@@ -200,10 +200,12 @@ test('scan lifecycle seals findings, coverage, report and manifest', async () =>
     assert.equal(exportedSarif.version, '2.1.0')
     assert.equal(exportedSarif.runs[0].results.length, 1)
 
-    const artifact = await service.saveArtifact({ scanId: second.scanId, path: 'notes/evidence.md', content: '# evidence\n', mediaType: 'text/markdown' })
+    const artifact = await service.saveArtifact({ scanId: second.scanId, path: 'artifacts/notes/evidence.md', content: '# evidence\n', mediaType: 'text/markdown' })
     assert.match(artifact.artifact.path, /^artifacts\/notes\/evidence\.md$/)
-    const read = await service.readArtifact({ scanId: second.scanId, path: 'notes/evidence.md' })
-    assert.match(read.content, /# evidence/)
+    const writeup = await service.saveArtifact({ scanId: second.scanId, path: 'findings/xss-login/xss-login.md', content: '# XSS\n', mediaType: 'text/markdown' })
+    assert.match(writeup.artifact.path, /^findings\/xss-login\/xss-login\.md$/)
+    const read = await service.readArtifact({ scanId: second.scanId, path: 'findings/xss-login/xss-login.md' })
+    assert.match(read.content, /# XSS/)
 
     const status = await service.status()
     assert.equal(status.ok, true)

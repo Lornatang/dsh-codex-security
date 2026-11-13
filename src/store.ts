@@ -7,6 +7,9 @@ import { ensureDir, joinWithin, nowIso, readJson, readText, sanitizeRelative, wr
 
 export interface ScanIndex { version: 1; scans: Record<string, ScanSummary & { repoKey: string }> }
 
+/** Files owned by the seal step; agents cannot overwrite them through save_artifact. */
+const SEALED_FILES = new Set(['scan.json', 'findings.json', 'coverage.json', 'scan-manifest.json', 'sarif.json', 'report.md', 'threat-model.md'])
+
 export interface CreateScanInput {
   scanId: string
   mode: ScanRecord['mode']
@@ -197,24 +200,25 @@ export class ScanStore {
     const found = await this.get(scanId)
     if (!found) throw new Error('codex-security: scan not found: ' + scanId)
     const clean = sanitizeRelative(relativePath)
-    const target = joinWithin(join(found.dir, 'artifacts'), clean)
+    if (SEALED_FILES.has(clean)) throw new Error('codex-security: cannot overwrite sealed artifact path: ' + clean)
+    const target = joinWithin(found.dir, clean)
     const data = Buffer.from(content, 'utf8')
     await ensureDir(dirname(target))
     await writeFileAtomic(target, data)
     const digest = sha256(data)
-    return { path: 'artifacts/' + clean, bytes: data.byteLength, sha256: digest, mediaType }
+    return { path: clean, bytes: data.byteLength, sha256: digest, mediaType }
   }
 
   async readArtifact(scanId: string, relativePath: string, limit: number): Promise<{ path: string; content: string; bytes: number; truncated: boolean }> {
     const found = await this.get(scanId)
     if (!found) throw new Error('codex-security: scan not found: ' + scanId)
-    const clean = relativePath.startsWith('artifacts/') ? sanitizeRelative(relativePath.slice('artifacts/'.length)) : sanitizeRelative(relativePath)
-    const target = joinWithin(join(found.dir, 'artifacts'), clean)
+    const clean = sanitizeRelative(relativePath)
+    const target = joinWithin(found.dir, clean)
     const content = await readText(target, limit)
     if (content === undefined) throw new Error('codex-security: artifact not found: ' + relativePath)
     const { stat } = await import('node:fs/promises')
     const info = await stat(target)
-    return { path: 'artifacts/' + clean, content, bytes: info.size, truncated: info.size > limit }
+    return { path: clean, content, bytes: info.size, truncated: info.size > limit }
   }
 
   async listArtifacts(scanId: string): Promise<{ path: string; bytes: number }[]> {
@@ -226,14 +230,19 @@ export class ScanStore {
       try { entries = await readdir(dir, { withFileTypes: true }) } catch { return }
       for (const entry of entries) {
         const rel = relBase.length > 0 ? relBase + '/' + entry.name : entry.name
-        if (entry.isDirectory()) { await walk(join(dir, entry.name), rel); continue }
+        if (entry.isDirectory()) {
+          if (relBase.length === 0 && entry.name === 'checkpoints') continue
+          await walk(join(dir, entry.name), rel)
+          continue
+        }
         if (!entry.isFile()) continue
+        if (relBase.length === 0 && SEALED_FILES.has(entry.name)) continue
         const { stat } = await import('node:fs/promises')
         const info = await stat(join(dir, entry.name))
-        results.push({ path: 'artifacts/' + rel, bytes: info.size })
+        results.push({ path: rel, bytes: info.size })
       }
     }
-    await walk(join(found.dir, 'artifacts'), '')
+    await walk(found.dir, '')
     return results.sort((left, right) => left.path.localeCompare(right.path))
   }
 
