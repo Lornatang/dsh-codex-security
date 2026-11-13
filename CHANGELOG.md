@@ -7,11 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Declare the required DSH skill service and register loadable bundled skills.
+- Validate tool arguments and JSON output through the real DSH host contract.
+- Bind accurate target scopes, file contents and complete Git diffs, including untracked files.
+- Require explicit review coverage and diff dispositions before sealing; reject changed targets,
+  incompatible comparisons and writes to sealed artifacts.
+- Serialize scan mutations, rebuild missing indexes and validate sealed JSON against the bundled schemas.
+
+### Added
+
+- A default-mode start tool, a diff review-item update tool and real-host regression tests.
+
 ### Changed
 
 - Publish the plugin as the scoped npm package `@lornatang/dsh-codex-security`. The
   initial bare `dsh-codex-security@0.1.0` publish is deprecated in favour of the scoped
   name; install with `dsh plugin --profile <profile> add @lornatang/dsh-codex-security`.
+- Ship the English documentation and examples with the package; align the architecture,
+  tool reference and skill workflows with the implementation.
 
 ## [0.1.0] - 2026-11-13
 
@@ -44,5 +59,5 @@ Initial public release of the DeepSeek Harness port of the codex-security scan m
 - Configuration through Schemastery: `stateDir`, `maxFiles`, `maxFileBytes`,
   `defaultMode`, `failOnSeverity`, `allowExportOutsideWorkspace`,
   `maxScanAgeDays`, `deepWorkers` and `deepMaxDiscoveryRuns`.
-- Documentation: README (English and Chinese), architecture, tool reference,
+- Documentation: README, architecture, tool reference,
   artifact contract, validation guide, and a GitHub Actions CI workflow.

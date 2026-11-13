@@ -1,4 +1,5 @@
 /** Shared types for the codex-security host plugin. */
+import type { SkillRegistration } from '@deepseek-ai/dsh-skill';
 export type Severity = 'informational' | 'low' | 'medium' | 'high' | 'critical';
 export type Confidence = 'high' | 'medium' | 'low';
 export type ScanMode = 'standard' | 'prompt-only' | 'deep';
@@ -65,7 +66,7 @@ export interface Finding {
     };
     taxonomy: {
         category: string;
-        cwe?: string | string[];
+        cwe: string[];
     };
     locations: FindingLocation[];
     remediation: string;
@@ -220,6 +221,12 @@ export interface ScanRecord {
     target: TargetInfo;
     scope: ScopeInfo;
     inventory: InventoryInfo;
+    /** Changed files captured when a diff scan was bound. */
+    diffFiles?: {
+        status: string;
+        path: string;
+        oldPath?: string;
+    }[];
     progress: ProgressInfo;
     budget?: DeepBudget;
     notes?: string;
@@ -336,6 +343,10 @@ export interface CoverageDocument {
     surfaces: CoverageSurface[];
     explicitExclusions: DraftExclusion[];
     deferred: DraftDeferred[];
+    resolvedDeferred?: {
+        id: string;
+        reason: string;
+    }[];
     openQuestions?: {
         question: string;
         followUpPrompt?: string;
@@ -362,22 +373,6 @@ export interface ToolDefinition {
     };
     execute(args: Record<string, unknown>, exec: unknown): Promise<unknown>;
     timeoutMs?: number;
-}
-export interface SkillRegistration {
-    name: string;
-    description: string;
-    content: string;
-    whenToUse?: string;
-    path?: string;
-    invocation?: {
-        modelInvocable: boolean;
-        userInvocable: boolean;
-    };
-    resourceBase?: {
-        kind: 'directory';
-        path: string;
-    };
-    metadata?: Record<string, unknown>;
 }
 export interface PluginContext {
     tools: {

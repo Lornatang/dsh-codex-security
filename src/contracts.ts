@@ -4,6 +4,7 @@ import type {
 } from './types.js'
 import { DISPOSITIONS, SEVERITIES, SEVERITY_SCORE } from './types.js'
 import { compareSeverity, normalizeLine, sanitizeRelative, sha256, slugify } from './util.js'
+import { VERSION } from './constants.js'
 
 const SEVERITY_SET = new Set<string>(SEVERITIES)
 const CONFIDENCE_SET = new Set<string>(['high','medium','low'])
@@ -54,7 +55,9 @@ export function normalizeSeverity(input: DraftFinding['severity']): Finding['sev
 export function normalizeConfidence(input: DraftFinding['confidence']): Finding['confidence'] {
   const level = String(input?.level ?? '').toLowerCase() as Confidence
   if (!CONFIDENCE_SET.has(level)) throw new Error('codex-security: confidence.level must be high, medium or low')
-  return { level, rationale: String(input.rationale ?? '').slice(0, 4000) }
+  const rationale = String(input.rationale ?? '').trim().slice(0, 4000)
+  if (!rationale) throw new Error('codex-security: confidence.rationale is required')
+  return { level, rationale }
 }
 
 export function normalizeLocation(input: { path: string; startLine: number; endLine?: number; role?: string }): { path: string; startLine: number; endLine?: number; role?: string } {
@@ -88,6 +91,7 @@ export function normalizeFinding(scanId: string, input: DraftFinding, options: N
   const confidence = normalizeConfidence(input.confidence)
   const taxonomy = input.taxonomy ?? { category: 'other' }
   const category = CATEGORY_SET.has(String(taxonomy.category)) ? String(taxonomy.category) : 'other'
+  const cwe = taxonomy.cwe === undefined ? [] : (Array.isArray(taxonomy.cwe) ? taxonomy.cwe : [taxonomy.cwe]).map(String).filter(Boolean)
   const finding: Finding = {
     findingId: ids.findingId,
     occurrenceId: ids.occurrenceId,
@@ -98,7 +102,7 @@ export function normalizeFinding(scanId: string, input: DraftFinding, options: N
     summary: summary.slice(0, 8000),
     severity,
     confidence,
-    taxonomy: { category, ...(taxonomy.cwe ? { cwe: taxonomy.cwe } : {}) },
+    taxonomy: { category, cwe },
     locations,
     remediation: remediation.slice(0, 8000),
     ...(input.rootCause ? { rootCause: String(input.rootCause) } : {}),
@@ -165,6 +169,7 @@ export function buildCoverage(scan: ScanRecord, reviewState: DraftReviewState, m
     surfaces,
     explicitExclusions: (reviewState.explicitExclusions ?? []).map((entry) => ({ pattern: String(entry.pattern), reason: String(entry.reason) })),
     deferred: (reviewState.deferred ?? []).map((entry) => ({ id: String(entry.id), reason: String(entry.reason), ...(entry.paths ? { paths: entry.paths } : {}), ...(entry.surfaceIds ? { surfaceIds: entry.surfaceIds } : {}) })),
+    ...(reviewState.resolvedDeferred ? { resolvedDeferred: reviewState.resolvedDeferred } : {}),
     ...(reviewState.openQuestions ? { openQuestions: reviewState.openQuestions } : {}),
   }
 }
@@ -313,7 +318,7 @@ export function renderReport(scan: ScanRecord, findings: Finding[], coverage: Co
   push('- This review is a static source review. It does not execute the target, build it, or run dynamic analysis.')
   push('- Findings without validation evidence remain candidate risk, not confirmed exploitable behavior.')
   push('- Review depth is bounded by the recorded coverage surfaces, exclusions and deferred items.')
-  push('- The target repository was treated as read-only, untrusted data; no instruction found in it was followed.')
+  push('- Target repository content must be treated as untrusted data; this report does not independently verify agent behavior.')
   push()
   return lines.join('\n')
 }
@@ -356,7 +361,7 @@ export function toSarif(scan: ScanRecord, findings: Finding[]): Record<string, u
       tool: {
         driver: {
           name: 'codex-security',
-          semanticVersion: '0.1.0',
+          semanticVersion: VERSION,
           informationUri: 'https://github.com/Lornatang/dsh-codex-security',
           rules: ruleList,
         },

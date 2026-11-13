@@ -31,7 +31,7 @@ Determine one of: the fix is present and matches the claimed invariant; the fix 
 
 ## 3. Start a fresh scan of the same scope
 
-Call `codex_security_start_standard_scan` with the same `targetPath`, `includePaths`, and `excludePaths` as the baseline, and `notes` naming the `baseScanId`, the finding id, and the verification goal. Store the returned `headScanId`. If the baseline was a deep scan and the user wants comparable depth, use `codex_security_start_deep_scan` with the same or explicitly stated budgets instead, and say which mode you used.
+Call `codex_security_start_scan` with the baseline scan's `mode`, `targetPath`, `includePaths`, and `excludePaths`, and `notes` naming the `baseScanId`, the finding id, and the verification goal. For a diff baseline, also pass the same base revision as `diffTarget` and the same `workingTree` setting. Store the returned `headScanId`. If the baseline was deep, use comparable budgets. If the same target, mode, and scope cannot be reproduced, report the mismatch instead of comparing them.
 
 Independently review the affected path. Do not copy the baseline findings into the new scan: assess the current code as it stands, specifically testing the claimed invariant, alternate encodings and callers, and sibling instances of the same broken control. Record new candidates and validations with `codex_security_record_discovery_candidates`, `codex_security_record_candidate_validations`, and `codex_security_record_candidate_attack_paths` for anything you find, including a bypass or a new finding caused by the fix.
 
@@ -39,9 +39,9 @@ Cover the surfaces that the original finding touched, and use `codex_security_up
 
 ## 4. Save the verification evidence and seal the new scan
 
-Before sealing, save `verify/<slug>-verification.md` with `codex_security_save_artifact` on the `headScanId`. Include the baseline and head revisions, the fix as observed, the original attack path retested, the result for each precondition and variant, the comparison outcome, and the limitations. Mark the artifact as static verification.
+Before sealing, save `verify/<slug>-verification.md` with `codex_security_save_artifact` on the `headScanId`. Include the baseline and head revisions, the fix as observed, the original attack path retested, the result for each precondition and variant, and the limitations. Mark the artifact as static verification. The comparison happens after sealing; record its outcome in the triage note and final response rather than changing the sealed artifact.
 
-Submit `codex_security_record_scan_draft` with findings, surfaces, exclusions, and `complete: true` when the new review is complete, then call `codex_security_complete_scan` with notes stating the verification goal and coverage. A head scan with zero findings is meaningful only if its surfaces show that the affected area was actually reviewed.
+Submit `codex_security_record_scan_draft` with findings, surfaces, exclusions, and `complete: true` when the new review is complete, record the verification goal and coverage with `codex_security_update_scan_context`, and then call `codex_security_complete_scan`. A head scan with zero findings is meaningful only if its surfaces show that the affected area was actually reviewed.
 
 ## 5. Compare the scans
 

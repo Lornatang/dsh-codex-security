@@ -15,7 +15,8 @@ import type {
 } from './types.js'
 import { FINDING_STATUSES, SEVERITIES } from './types.js'
 import { ScanStore, defaultStateDir } from './store.js'
-import { readEvidenceLine, resolveDiff, resolveTarget } from './target.js'
+import { readEvidenceLine, resolveTarget } from './target.js'
+import { assertArtifactContract } from './schema.js'
 import { ensureDir, isWithin, joinWithin, newId, nowIso, readJson, readText, sanitizeRelative, sha256, truncate, writeFileAtomic, writeJsonAtomic } from './util.js'
 
 export const FORMATS = ['sarif', 'json', 'csv', 'markdown'] as const
@@ -67,33 +68,18 @@ function requiredArray(args: Json, key: string): unknown[] {
   if (!Array.isArray(value)) throw new Error('codex-security: ' + key + ' must be an array')
   return value
 }
-function scanModeOf(value: string | undefined, fallback: ScanMode): ScanMode {
-  if (value === 'standard' || value === 'prompt-only' || value === 'deep') return value
-  return fallback
-}
 function thresholdOf(value: string | undefined): string {
   const allowed = ['informational', 'low', 'medium', 'high', 'critical', 'off']
   return value !== undefined && allowed.includes(value) ? value : DEFAULT_CONFIG.failOnSeverity
 }
 
+function samePaths(left: string[], right: string[]): boolean {
+  return JSON.stringify([...new Set(left)].sort()) === JSON.stringify([...new Set(right)].sort())
+}
+
 function renderThreatModel(value: Record<string, unknown> | string): string {
   if (typeof value === 'string') return value
   return '# Threat model\n\n```json\n' + JSON.stringify(value, null, 2) + '\n```\n'
-}
-
-function renderScopeSummary(scan: ScanRecord, findings: Finding[]): string {
-  const counts = severityCounts(findings)
-  const lines: string[] = []
-  lines.push('# Scan summary: ' + scan.target.displayName)
-  lines.push('')
-  lines.push('- scanId: ' + scan.scanId)
-  lines.push('- mode: ' + scan.mode)
-  lines.push('- target: ' + scan.target.displayName + ' (' + scan.target.kind + ')')
-  lines.push('- revision: ' + (scan.target.revision ?? 'n/a'))
-  lines.push('- scope: ' + scan.scope.includePaths.join(', '))
-  lines.push('- files in inventory: ' + scan.inventory.totalFiles)
-  lines.push('- findings: ' + findings.length + ' (critical ' + counts.critical + ', high ' + counts.high + ', medium ' + counts.medium + ', low ' + counts.low + ', informational ' + counts.informational + ')')
-  return lines.join('\n') + '\n'
 }
 
 export interface SecurityServiceOptions {
@@ -105,12 +91,33 @@ export class SecurityService {
   readonly store: ScanStore
   readonly config: Config
   private readonly ctx: PluginContext
+  private readonly scanLocks = new Map<string, Promise<void>>()
 
   constructor(ctx: PluginContext, options: SecurityServiceOptions = {}) {
     this.ctx = ctx
     this.config = { ...DEFAULT_CONFIG, ...(options.config ?? {}) }
     const patchPath = options.patchPath ?? ctx.profileContext?.patchPath
     this.store = new ScanStore(defaultStateDir(patchPath, this.config.stateDir))
+  }
+
+  /** Serialize complete read-modify-write operations for each scan within this process. */
+  private async withScanLock<T>(scanId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.scanLocks.get(scanId) ?? Promise.resolve()
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const tail = previous.then(() => held)
+    this.scanLocks.set(scanId, tail)
+    await previous
+    try { return await operation() } finally {
+      release()
+      if (this.scanLocks.get(scanId) === tail) this.scanLocks.delete(scanId)
+    }
+  }
+
+  private async requireRunningScan(scanId: string): Promise<{ record: ScanRecord; dir: string }> {
+    const found = await this.requireScan(scanId)
+    if (found.record.status !== 'running') throw new Error('codex-security: scan is ' + found.record.status + ' and cannot be modified')
+    return found
   }
 
   private async ready(): Promise<ScanStore> {
@@ -197,16 +204,12 @@ export class SecurityService {
     })
     let diff: Json | undefined
     if (resolved.target.kind === 'git_diff') {
-      const snapshot = await resolveDiff(resolved.target.rootPath, {
-        diffTarget: resolved.target.diffTarget,
-        workingTree: resolved.target.workingTree === true || resolved.target.diffTarget === undefined,
-      })
       diff = {
-        base: snapshot.base ?? null,
-        head: snapshot.head ?? null,
-        workingTree: snapshot.workingTree,
-        changedFiles: snapshot.files.slice(0, 300).map((file) => ({ status: file.status, path: file.path, oldPath: file.oldPath })),
-        changedCount: snapshot.files.length,
+        base: resolved.target.baseRevision ?? null,
+        head: resolved.target.headRevision ?? null,
+        workingTree: resolved.target.workingTree === true,
+        changedFiles: (resolved.diffFiles ?? []).slice(0, 300),
+        changedCount: resolved.diffFiles?.length ?? 0,
       }
     }
     return {
@@ -224,6 +227,12 @@ export class SecurityService {
         'Follow the scan skill workflow and record evidence artifacts before completing the scan.',
       ],
     }
+  }
+
+  async startDefaultScan(args: Json): Promise<Json> {
+    const requested = str(args['mode']) ?? this.config.defaultMode
+    if (!['standard', 'prompt-only', 'deep'].includes(requested)) throw new Error('codex-security: invalid scan mode: ' + requested)
+    return this.startScan(args, requested as ScanMode)
   }
 
   async startScan(args: Json, kind: 'standard' | 'prompt-only' | 'deep'): Promise<Json> {
@@ -255,6 +264,7 @@ export class SecurityService {
       target: resolved.target,
       scope: resolved.scope,
       inventory: resolved.inventory,
+      ...(resolved.diffFiles ? { diffFiles: resolved.diffFiles } : {}),
       ...(budget ? { budget } : {}),
       ...(str(args['notes']) ? { notes: str(args['notes']) as string } : {}),
       ...(args['threatModel'] !== undefined ? { threatModel: args['threatModel'] as Record<string, unknown> } : {}),
@@ -334,7 +344,12 @@ export class SecurityService {
   }
 
   async updateScanContext(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.updateScanContextUnlocked(args))
+  }
+
+  private async updateScanContextUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
+    await this.requireRunningScan(scanId)
     const includePaths = strArray(args['includePaths'])
     const excludePaths = strArray(args['excludePaths'])
     const notes = str(args['notes'])
@@ -342,15 +357,20 @@ export class SecurityService {
     const record = await this.store.update(scanId, (current) => {
       if (notes) current.notes = (current.notes ? current.notes + '\n' : '') + notes
       if (threatModel !== undefined) current.threatModel = threatModel as Record<string, unknown>
-      if (includePaths) current.scope.includePaths = includePaths
-      if (excludePaths) current.scope.excludePaths = excludePaths
-      if (includePaths || excludePaths) current.warnings = [...new Set([...current.warnings, 'scope updated after target binding; inventory reflects the start-of-scan scope'])]
+      if ((includePaths && !samePaths(includePaths, current.scope.includePaths)) || (excludePaths && !samePaths(excludePaths, current.scope.excludePaths))) {
+        throw new Error('codex-security: scan scope is bound; start a new scan to change it')
+      }
     })
     return { ok: true, scan: record }
   }
 
   async updateScanProgress(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.updateScanProgressUnlocked(args))
+  }
+
+  private async updateScanProgressUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
+    await this.requireRunningScan(scanId)
     const phase = str(args['phase'])
     const note = str(args['note'])
     const discoveryRun = bool(args['discoveryRun']) === true || num(args['discoveryRun']) === 1
@@ -363,9 +383,17 @@ export class SecurityService {
   }
 
   async recordScanDraft(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.recordScanDraftUnlocked(args))
+  }
+
+  private async recordScanDraftUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
-    const { record, dir } = await this.requireScan(scanId)
+    const { record, dir } = await this.requireRunningScan(scanId)
     const draft = validateDraft(args['draft'] ?? args)
+    if ((draft.scope?.includePaths && !samePaths(draft.scope.includePaths, record.scope.includePaths)) ||
+        (draft.scope?.excludePaths && !samePaths(draft.scope.excludePaths, record.scope.excludePaths))) {
+      throw new Error('codex-security: draft scope differs from the bound scan scope')
+    }
     const evidence = await this.collectEvidenceLines(record, draft.findings)
     const findings = draft.findings.map((input) => normalizeFinding(scanId, input, { rootPath: record.target.rootPath, evidenceLines: evidence }))
     const deduped: Finding[] = []
@@ -375,6 +403,7 @@ export class SecurityService {
       seen.add(finding.fingerprints.primary)
       deduped.push(finding)
     }
+    assertArtifactContract('findings', buildFindingsDocument(scanId, deduped))
     const stored: StoredDraft = {
       scanId,
       recordedAt: nowIso(),
@@ -390,7 +419,7 @@ export class SecurityService {
       current.severityCounts = counts
       current.progress.phase = 'draft-recorded'
       if (draft.threatModel !== undefined) current.threatModel = draft.threatModel
-      if (draft.scope !== undefined) current.scope = { ...current.scope, ...draft.scope }
+      if (draft.scope?.summary) current.scope.summary = draft.scope.summary
     })
     return {
       ok: true,
@@ -440,8 +469,12 @@ export class SecurityService {
   }
 
   async recordDiscoveryCandidates(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.recordDiscoveryCandidatesUnlocked(args))
+  }
+
+  private async recordDiscoveryCandidatesUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
-    const { record, dir } = await this.requireScan(scanId)
+    const { record, dir } = await this.requireRunningScan(scanId)
     const inputs = requiredArray(args, 'candidates')
     const document = (await readJson<CandidatesDocument>(join(dir, 'candidates.json'))) ?? { scanId, updatedAt: nowIso(), candidates: [] }
     const existing = new Map(document.candidates.map((candidate) => [candidate.ruleId + '\u0000' + candidate.anchor + '\u0000' + (candidate.instance ?? ''), candidate]))
@@ -477,7 +510,7 @@ export class SecurityService {
     }
     document.updatedAt = nowIso()
     await writeJsonAtomic(join(dir, 'candidates.json'), document)
-    await this.store.update(scanId, (current) => { if (current.progress.phase === 'target-bound') current.progress.phase = 'discovering'; current.progress.discoveryRuns += 1 })
+    await this.store.update(scanId, (current) => { if (current.progress.phase === 'target-bound') current.progress.phase = 'discovering' })
     return { ok: true, scanId, added, duplicates: inputs.length - added, total: document.candidates.length, candidates: document.candidates }
   }
 
@@ -496,8 +529,12 @@ export class SecurityService {
   }
 
   async recordCandidateValidations(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.recordCandidateValidationsUnlocked(args))
+  }
+
+  private async recordCandidateValidationsUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
-    const { dir } = await this.requireScan(scanId)
+    const { dir } = await this.requireRunningScan(scanId)
     const candidates = (await readJson<CandidatesDocument>(join(dir, 'candidates.json')))?.candidates ?? []
     const byId = new Map(candidates.map((candidate) => [candidate.candidateId, candidate]))
     const inputs = requiredArray(args, 'validations')
@@ -509,6 +546,7 @@ export class SecurityService {
       const candidate = byId.get(candidateId)
       if (!candidate) throw new Error('codex-security: unknown candidateId: ' + candidateId)
       const status = requiredStr(input, 'status')
+      if (!['reportable', 'validated', 'deferred', 'rejected', 'suppressed', 'not_applicable'].includes(status)) throw new Error('codex-security: invalid candidate validation status: ' + status)
       const summary = requiredStr(input, 'summary')
       document.validations.push({
         candidateId,
@@ -532,8 +570,12 @@ export class SecurityService {
   }
 
   async recordCandidateAttackPaths(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.recordCandidateAttackPathsUnlocked(args))
+  }
+
+  private async recordCandidateAttackPathsUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
-    const { dir } = await this.requireScan(scanId)
+    const { dir } = await this.requireRunningScan(scanId)
     const candidates = (await readJson<CandidatesDocument>(join(dir, 'candidates.json')))?.candidates ?? []
     const byId = new Map(candidates.map((candidate) => [candidate.candidateId, candidate]))
     const inputs = requiredArray(args, 'attackPaths')
@@ -560,10 +602,14 @@ export class SecurityService {
   }
 
   async saveArtifact(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.saveArtifactUnlocked(args))
+  }
+
+  private async saveArtifactUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
     const path = requiredStr(args, 'path')
-    const content = str(args['content'])
-    if (content === undefined) throw new Error('codex-security: content is required')
+    const content = typeof args['content'] === 'string' ? args['content'] : undefined
+    if (content === undefined || content.trim().length === 0) throw new Error('codex-security: content is required')
     const mediaType = str(args['mediaType']) ?? 'text/markdown'
     const relative = path.startsWith('./') ? path.slice(2) : path
     const artifact = await this.store.saveArtifact(scanId, relative, content, mediaType)
@@ -582,27 +628,45 @@ export class SecurityService {
   }
 
   async completeScan(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.completeScanUnlocked(args))
+  }
+
+  private async completeScanUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
     const { record, dir } = await this.requireScan(scanId)
     if (record.status === 'completed') throw new Error('codex-security: scan already completed: ' + scanId)
     if (record.status === 'canceled' || record.status === 'failed') throw new Error('codex-security: scan is ' + record.status + ' and cannot be completed: ' + scanId)
     const draft = await readJson<StoredDraft>(join(dir, 'checkpoints', 'scan-draft.json'))
     if (!draft) throw new Error('codex-security: no draft recorded; call codex_security_record_scan_draft before completing the scan')
+    if (!draft.complete) throw new Error('codex-security: draft is incomplete; record a complete draft before sealing')
+    const currentTarget = await resolveTarget({
+      targetPath: record.target.rootPath,
+      includePaths: record.scope.includePaths,
+      excludePaths: record.scope.excludePaths,
+      ...(record.target.baseRevision ? { diffTarget: record.target.baseRevision } : {}),
+      workingTree: record.target.workingTree === true,
+      maxFiles: this.config.maxFiles,
+      maxFileBytes: this.config.maxFileBytes,
+    })
+    if (currentTarget.target.snapshotDigest !== record.target.snapshotDigest) throw new Error('codex-security: target changed after scan binding; start a new scan')
     const findings = sortedFindings(draft.findings ?? [])
     const reviewState: DraftReviewState = draft.input.reviewState ?? { surfaces: [] }
     const warnings = [...record.warnings]
-    if (draft.complete === false) warnings.push('scan was completed with a draft that was not marked complete')
-    if (reviewState.surfaces.length === 0) {
-      const summary = renderScopeSummary(record, findings)
-      const artifact = await this.store.saveArtifact(scanId, 'artifacts/scan-summary.md', summary, 'text/markdown')
-      reviewState.surfaces = [{
-        id: 'surface-1',
-        label: 'repository review',
-        disposition: findings.length > 0 ? 'reported' : 'no_issue_found',
-        receiptRefs: [artifact.path],
-      }]
-      record.artifacts = [...record.artifacts.filter((entry) => entry.path !== artifact.path), { ...artifact, createdAt: nowIso() }]
-      warnings.push('no coverage surfaces were submitted; a default surface was recorded')
+    if (reviewState.surfaces.length === 0) throw new Error('codex-security: at least one coverage surface is required before sealing')
+    const candidates = (await readJson<CandidatesDocument>(join(dir, 'candidates.json')))?.candidates ?? []
+    const validations = (await readJson<ValidationsDocument>(join(dir, 'validations.json')))?.validations ?? []
+    const latestValidation = new Map(validations.map((validation) => [validation.candidateId, validation.status]))
+    if (candidates.some((candidate) => candidate.status === 'discovered' || (candidate.status === 'validating' &&
+      (latestValidation.get(candidate.candidateId) !== 'deferred' || !(reviewState.deferred ?? []).some((entry) => entry.id === candidate.candidateId || entry.paths?.includes(candidate.path)))))) {
+      throw new Error('codex-security: all candidates need a final disposition before sealing')
+    }
+    if (record.target.kind === 'git_diff') {
+      const items = await readJson<ReviewItemsDocument>(join(dir, 'review-items.json'))
+      const expected = record.diffFiles
+      if (!items || !expected || items.items.length !== expected.length || items.items.some((item) => item.status === 'pending') ||
+          expected.some((file) => !items.items.some((item) => item.path === file.path))) {
+        throw new Error('codex-security: every bound diff file needs a review item and disposition before sealing')
+      }
     }
     const coverage = buildCoverage(record, reviewState)
     const threatModel = draft.input.threatModel ?? record.threatModel
@@ -610,6 +674,8 @@ export class SecurityService {
     const findingsDocument = buildFindingsDocument(scanId, findings)
     const sarif = toSarif(record, findings)
     const report = renderReport(record, findings, coverage, { sealedAt, threatModel })
+    assertArtifactContract('findings', findingsDocument)
+    assertArtifactContract('coverage', coverage)
     await writeJsonAtomic(join(dir, 'findings.json'), findingsDocument)
     await writeJsonAtomic(join(dir, 'coverage.json'), coverage)
     await writeJsonAtomic(join(dir, 'sarif.json'), sarif)
@@ -657,19 +723,19 @@ export class SecurityService {
           includePaths: record.scope.includePaths,
           excludePaths: record.scope.excludePaths,
           ...(record.scope.summary ? { summary: record.scope.summary } : {}),
-          artifactsReviewed: record.inventory.inspectedFiles,
           runtimeStatus: 'not_executed',
           validationMode: 'static_source_review',
-          context: record.notes ?? null,
+          ...(record.notes ? { context: record.notes } : {}),
           limitations: warnings,
         },
         findingsRef: 'findings.json',
         artifacts,
-        mode: record.mode,
+        mode: coverage.mode,
         warnings,
         review: { excludedPaths: record.scope.excludePaths },
       },
     }
+    assertArtifactContract('scan-manifest', manifest)
     await writeJsonAtomic(join(dir, 'scan-manifest.json'), manifest)
     const counts = severityCounts(findings)
     const updated = await this.store.update(scanId, (current) => {
@@ -704,7 +770,12 @@ export class SecurityService {
   }
 
   async failScan(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.failScanUnlocked(args))
+  }
+
+  private async failScanUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
+    await this.requireRunningScan(scanId)
     const error = requiredStr(args, 'error')
     const record = await this.store.update(scanId, (current) => {
       if (current.status === 'completed') throw new Error('codex-security: completed scan cannot fail: ' + scanId)
@@ -716,7 +787,12 @@ export class SecurityService {
   }
 
   async cancelScan(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.cancelScanUnlocked(args))
+  }
+
+  private async cancelScanUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
+    await this.requireRunningScan(scanId)
     const reason = str(args['reason'])
     const record = await this.store.update(scanId, (current) => {
       if (current.status === 'completed') throw new Error('codex-security: completed scan cannot be canceled: ' + scanId)
@@ -794,6 +870,10 @@ export class SecurityService {
   }
 
   async setFindingTriage(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.setFindingTriageUnlocked(args))
+  }
+
+  private async setFindingTriageUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
     const findingId = requiredStr(args, 'findingId')
     const status = requiredStr(args, 'status')
@@ -813,6 +893,10 @@ export class SecurityService {
   }
 
   async setFindingRemediation(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.setFindingRemediationUnlocked(args))
+  }
+
+  private async setFindingRemediationUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
     const findingId = requiredStr(args, 'findingId')
     const remediation = requiredStr(args, 'remediation')
@@ -835,6 +919,7 @@ export class SecurityService {
   async exportContent(scanId: string, format: string): Promise<{ content: string; mediaType: string; filename: string; count: number; policy?: Json }> {
     if (!(FORMATS as readonly string[]).includes(format)) throw new Error('codex-security: format must be one of ' + FORMATS.join(', '))
     const { record, dir } = await this.requireScan(scanId)
+    if (record.status !== 'completed') throw new Error('codex-security: scan must be completed before export')
     const findings = await this.store.readFindings(scanId)
     const policy = policyGate(findings, thresholdOf(this.config.failOnSeverity))
     if (format === 'json') {
@@ -864,6 +949,7 @@ export class SecurityService {
     const output = requested
       ? resolvePath(requested)
       : join(this.store.stateDir, 'exports', scanId + '.' + extension)
+    if (isWithin(join(this.store.stateDir, 'repositories'), output)) throw new Error('codex-security: refusing to export into scan storage')
     const allowedRoots = [this.store.stateDir, process.cwd(), record.target.rootPath]
     if (!this.config.allowExportOutsideWorkspace && !allowedRoots.some((root) => isWithin(root, output))) {
       throw new Error('codex-security: refusing to write outside the workspace/state dir; pass an in-workspace outputPath or enable allowExportOutsideWorkspace')
@@ -874,12 +960,19 @@ export class SecurityService {
   }
 
   async prepareReviewItems(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), () => this.prepareReviewItemsUnlocked(args))
+  }
+
+  private async prepareReviewItemsUnlocked(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
-    const { record, dir } = await this.requireScan(scanId)
+    const { record, dir } = await this.requireRunningScan(scanId)
     if (record.target.kind !== 'git_diff') throw new Error('codex-security: review items require a diff scan (start with diffTarget or workingTree)')
-    const snapshot = await resolveDiff(record.target.rootPath, { diffTarget: record.target.diffTarget, workingTree: record.target.workingTree === true || record.target.diffTarget === undefined })
+    if (!record.diffFiles) throw new Error('codex-security: this legacy diff scan has no bound file list; start a new scan')
     const requested = strArray(args['files'])
-    const changed = requested ? requested.map((path) => ({ status: 'unknown', path: sanitizeRelative(path) })) : snapshot.files
+    if (requested && !samePaths(requested.map(sanitizeRelative), record.diffFiles.map((file) => file.path))) {
+      throw new Error('codex-security: files must match all files bound to this diff scan')
+    }
+    const changed = record.diffFiles
     const previous = (await readJson<ReviewItemsDocument>(join(dir, 'review-items.json')))?.items ?? []
     const previousByPath = new Map(previous.map((item) => [item.path, item]))
     const items: ReviewItem[] = changed.map((file) => {
@@ -894,7 +987,7 @@ export class SecurityService {
         updatedAt: nowIso(),
       }
     })
-    const document: ReviewItemsDocument = { scanId, preparedAt: nowIso(), ...(snapshot.base ? { base: snapshot.base } : {}), ...(snapshot.head ? { head: snapshot.head } : {}), workingTree: snapshot.workingTree, items }
+    const document: ReviewItemsDocument = { scanId, preparedAt: nowIso(), ...(record.target.baseRevision ? { base: record.target.baseRevision } : {}), ...(record.target.headRevision ? { head: record.target.headRevision } : {}), workingTree: record.target.workingTree === true, items }
     await writeJsonAtomic(join(dir, 'review-items.json'), document)
     await this.store.update(scanId, (current) => { current.progress.phase = 'review-items-prepared' })
     return { ok: true, scanId, total: items.length, byChangeType: this.countBy(items.map((item) => item.changeType)), byStatus: this.countBy(items.map((item) => item.status)), items }
@@ -910,9 +1003,53 @@ export class SecurityService {
     return { ok: true, scanId, preparedAt: document.preparedAt, total: items.length, byStatus: this.countBy(items.map((item) => item.status)), items }
   }
 
+  async updateReviewItem(args: Json): Promise<Json> {
+    return this.withScanLock(requiredStr(args, 'scanId'), async () => {
+      const scanId = requiredStr(args, 'scanId')
+      const { dir } = await this.requireRunningScan(scanId)
+      const status = requiredStr(args, 'status')
+      const allowed: ReviewItem['status'][] = ['pending', 'reviewed', 'no_issue_found', 'rejected', 'not_applicable', 'needs_follow_up']
+      if (!allowed.includes(status as ReviewItem['status'])) throw new Error('codex-security: invalid review item status')
+      const reviewId = str(args['reviewId'])
+      const path = str(args['path'])
+      if (!reviewId && !path) throw new Error('codex-security: reviewId or path is required')
+      const document = await readJson<ReviewItemsDocument>(join(dir, 'review-items.json'))
+      if (!document) throw new Error('codex-security: review items have not been prepared for this scan')
+      const item = document.items.find((entry) => reviewId ? entry.reviewId === reviewId : entry.path === sanitizeRelative(path as string))
+      if (!item) throw new Error('codex-security: review item not found')
+      item.status = status as ReviewItem['status']
+      const note = str(args['note'])
+      if (note) item.note = note
+      item.updatedAt = nowIso()
+      await writeJsonAtomic(join(dir, 'review-items.json'), document)
+      return { ok: true, scanId, item }
+    })
+  }
+
   async compareScans(args: Json): Promise<Json> {
     const baseScanId = requiredStr(args, 'baseScanId')
     const headScanId = requiredStr(args, 'headScanId')
+    const [baseScan, headScan] = await Promise.all([this.requireScan(baseScanId), this.requireScan(headScanId)])
+    const baseRecord = baseScan.record
+    const headRecord = headScan.record
+    if (baseRecord.status !== 'completed' || headRecord.status !== 'completed') throw new Error('codex-security: both scans must be completed before comparison')
+    if (baseRecord.target.rootPath !== headRecord.target.rootPath || baseRecord.target.kind !== headRecord.target.kind ||
+        baseRecord.mode !== headRecord.mode || !samePaths(baseRecord.scope.includePaths, headRecord.scope.includePaths) ||
+        !samePaths(baseRecord.scope.excludePaths, headRecord.scope.excludePaths) ||
+        (baseRecord.target.kind === 'git_diff' && (baseRecord.target.baseRevision !== headRecord.target.baseRevision || baseRecord.target.workingTree !== headRecord.target.workingTree))) {
+      throw new Error('codex-security: scans have incompatible targets, modes, or scopes')
+    }
+    for (const scan of [baseScan, headScan]) {
+      const coverage = await readJson<CoverageDocument>(join(scan.dir, 'coverage.json'))
+      const document = await readJson<{ findings?: Finding[] }>(join(scan.dir, 'findings.json'))
+      const review = scan.record.target.kind === 'git_diff' ? await readJson<ReviewItemsDocument>(join(scan.dir, 'review-items.json')) : undefined
+      if (!document || !Array.isArray(document.findings) || !coverage || !coverage.surfaces?.length ||
+          coverage.deferred?.length || coverage.surfaces.some((surface) => surface.disposition === 'needs_follow_up') ||
+          (scan.record.target.kind === 'git_diff' && (!review || review.items.some((item) => item.status === 'pending' || item.status === 'needs_follow_up'))) ||
+          scan.record.inventory.truncated || scan.record.warnings.some((warning) => warning.startsWith('snapshot could not hash file:'))) {
+        throw new Error('codex-security: scans need complete findings and comparable coverage before comparison')
+      }
+    }
     const base = await this.store.readFindings(baseScanId)
     const head = await this.store.readFindings(headScanId)
     const baseMap = new Map(base.map((finding) => [finding.fingerprints.primary, finding]))

@@ -1,16 +1,17 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { SkillRegistration } from '@deepseek-ai/dsh-skill'
 import { PLUGIN_NAME, PACKAGE_NAME, VERSION } from './constants.js'
 import { Config } from './config.js'
 import type { Config as ConfigType } from './config.js'
 import { SecurityService } from './service.js'
 import { bindRoutes } from './routes.js'
 import { registerSecurityTools } from './tools.js'
-import type { PluginContext, SkillRegistration } from './types.js'
+import type { PluginContext } from './types.js'
 
 export const name = PLUGIN_NAME
-export const inject = ['tools']
+export const inject = ['tools', 'skills']
 export { Config }
 export const version = VERSION
 export const packageName = PACKAGE_NAME
@@ -65,6 +66,7 @@ export function loadBundledSkills(packageRoot: string): SkillRegistration[] {
     skills.push({
       name: skillName,
       description,
+      source: 'bundled',
       ...(frontmatter.whenToUse ? { whenToUse: frontmatter.whenToUse } : {}),
       content: body,
       path: file,
@@ -77,14 +79,9 @@ export function loadBundledSkills(packageRoot: string): SkillRegistration[] {
 }
 
 function registerSkills(ctx: PluginContext, packageRoot: string): () => void {
-  const registry = (ctx as unknown as { skills?: { register?: (skill: SkillRegistration) => () => void } | undefined }).skills
-  if (!registry || typeof registry.register !== 'function') {
-    ctx.logger.warn('codex-security: skills service is not available; skill workflows will not be exposed')
-    return () => undefined
-  }
   const disposers: (() => void)[] = []
   for (const skill of loadBundledSkills(packageRoot)) {
-    try { disposers.push(registry.register(skill)) } catch (error) { ctx.logger.warn('codex-security: failed to register skill ' + skill.name + ': ' + String(error)) }
+    try { disposers.push(ctx.skills.register(skill)) } catch (error) { ctx.logger.warn('codex-security: failed to register skill ' + skill.name + ': ' + String(error)) }
   }
   ctx.logger.info('codex-security: registered ' + disposers.length + ' skills')
   return () => { for (const dispose of disposers) { try { dispose() } catch { /* disposed */ } } }

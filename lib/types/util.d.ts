@@ -15,6 +15,8 @@ export declare function joinWithin(root: string, relPath: string): string;
 /** Convert a gitignore-style glob into a RegExp matched against a posix relative path. */
 export declare function globToRegExp(pattern: string): RegExp;
 export declare function matchesAny(relPath: string, patterns: string[]): boolean;
+/** Match either a directory path and its descendants, or an explicit glob. */
+export declare function matchesScopePath(relPath: string, patterns: string[]): boolean;
 export declare function isProbablyBinary(path: string): boolean;
 export declare function languageOf(path: string): string;
 export declare function slugify(value: string, max?: number): string;
@@ -25,6 +27,7 @@ export declare function listFiles(root: string, options: {
     maxFiles: number;
     exclude: string[];
     include?: string[];
+    filter?: (path: string) => boolean;
     followSymlinks?: boolean;
 }): Promise<{
     files: string[];

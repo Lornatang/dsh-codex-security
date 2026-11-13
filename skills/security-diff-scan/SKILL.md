@@ -23,19 +23,19 @@ Call `codex_security_inspect_setup` once and note `stateDir`, `maxFiles`, `maxFi
 
 ## 2. Resolve the exact change
 
-Determine the comparison precisely and write it down before starting: base revision, head revision, and whether the working tree is included. Use read-only Git commands through `bash`, such as `git rev-parse HEAD`, `git merge-base <base> <head>`, `git diff --name-status <base>...<head>`, `git diff --stat`, `git status --porcelain`, `git log --oneline -n 20`, and `git show <base>:<path>` for a file deleted by the change. Never fetch, pull, checkout, or mutate refs. If the repository is not a Git checkout, use the user's patch file or the intended directory pair and record that limitation.
+Determine the comparison precisely and write it down before starting: base revision, head revision, and whether the working tree is included. Use read-only Git commands through `bash`, such as `git rev-parse HEAD`, `git merge-base <base> <head>`, `git diff --name-status <base>...<head>`, `git diff --stat`, `git status --porcelain`, `git log --oneline -n 20`, and `git show <base>:<path>` for a file deleted by the change. Never fetch, pull, checkout, or mutate refs. The plugin's diff scan requires a Git checkout; for a supplied patch or directory pair outside Git, report the limitation and use an appropriately scoped directory review instead.
 
 Collect the authoritative changed-file list with statuses (added, modified, deleted, renamed, copied, unmerged). Include staged, unstaged, and untracked paths when the working tree is in scope. Keep the list; the sealed scan must account for every entry on it.
 
 ## 3. Bind the target and start the scan
 
-Call `codex_security_inspect_target` with `targetPath`, `scope`, and `diffTarget` or `workingTree` so the scan context matches the comparison you resolved. Then call `codex_security_start_standard_scan` with the same `targetPath`, `includePaths`, `excludePaths`, and `notes` that name the base and head revisions, the comparison mode, and the user's question. Record the returned `scanId` and call `codex_security_get_scan_context` to confirm the stored diff context.
+Call `codex_security_inspect_target` with `targetPath`, `includePaths`, `excludePaths`, and `diffTarget` or `workingTree` so the scan context matches the comparison you resolved. Then call `codex_security_start_standard_scan` with the same `targetPath`, `includePaths`, `excludePaths`, `diffTarget` or `workingTree`, and `notes` that name the base and head revisions, the comparison mode, and the user's question. Record the returned `scanId` and call `codex_security_get_scan_context` to confirm the stored diff context.
 
 If the user supplied an existing `scanId` for the same comparison, resume it with `codex_security_get_scan_context` instead of creating a second scan. Never mix two different comparisons in one scan.
 
 ## 4. Prepare and enumerate review items
 
-Call `codex_security_prepare_review_items` with the `scanId` and, when you already hold the exact list, the `files` argument to scope it. Then paginate `codex_security_list_review_items` and compare the returned items against your changed-file list. Every changed text file must appear as a review item or be explicitly excluded by you with a recorded reason. Binary, generated, lockfile-only, vendored, and deleted files are not automatically skipped: classify them, then record each decision.
+Call `codex_security_prepare_review_items` with the `scanId`; it uses the complete file list bound when the scan started. Call `codex_security_list_review_items` and compare the returned items against your changed-file list. Every changed text file must appear as a review item or be explicitly excluded by you with a recorded reason. Binary, generated, lockfile-only, vendored, and deleted files are not automatically skipped: classify them, then record each decision.
 
 ## 5. Review each changed file
 
@@ -48,7 +48,7 @@ For each file, read the diff hunks with the `read`, `grep`, and `glob` tools, th
 5. Is the changed code reachable from an entry point that the change itself introduces or exposes?
 6. For deleted or renamed code, what did the baseline file enforce, and is that enforcement preserved elsewhere?
 
-Read the controlling helper, middleware, or policy when the answer depends on it, plus representative callers when reachability is unclear. A suspicious diff line without a reachable path remains a candidate until you find the evidence or reject it.
+For a commit-only diff, read the bound revision with `git show <head>:<path>` rather than assuming working-tree contents match. For each review item, call `codex_security_update_review_item` with its `reviewId`, a disposition, and a note. Read the controlling helper, middleware, or policy when the answer depends on it, plus representative callers when reachability is unclear. A suspicious diff line without a reachable path remains a candidate until you find the evidence or reject it.
 
 ## 6. Record candidates and validate them
 
@@ -74,7 +74,7 @@ For each reported finding that warrants a standalone report, save `findings/<slu
 
 ## 10. Seal, export, and report
 
-Call `codex_security_complete_scan` with `notes` stating the base and head revisions, changed-file count, reviewed count, exclusions, and limitations. Read the sealed result with `codex_security_get_scan` and confirm the status and artifacts.
+Call `codex_security_update_scan_context` with `notes` stating the base and head revisions, changed-file count, reviewed count, exclusions, and limitations, then call `codex_security_complete_scan`. Read the sealed result with `codex_security_get_scan` and confirm the status and artifacts.
 
 Export with `codex_security_export_findings` only when the user asked for a file, using `sarif`, `json`, `csv`, or `markdown`. Omit `outputPath` unless the user chose a path and the configuration allows exports outside the workspace.
 

@@ -7,7 +7,7 @@ This directory contains the ten agent skills that ship with the Codex Security p
 | Skill | Use it when | Main tools |
 | --- | --- | --- |
 | `security-scan` | The user wants a normal security review of a repository, directory, or set of files. | `codex_security_inspect_target`, `codex_security_start_standard_scan`, `codex_security_record_scan_draft`, `codex_security_complete_scan` |
-| `security-diff-scan` | The user wants a pull request, commit range, branch, patch, or working tree reviewed and every changed text file accounted for. | `codex_security_prepare_review_items`, `codex_security_list_review_items`, `codex_security_record_scan_draft` |
+| `security-diff-scan` | The user wants a pull request, commit range, branch, patch, or working tree reviewed and every changed file accounted for. | `codex_security_prepare_review_items`, `codex_security_update_review_item`, `codex_security_record_scan_draft` |
 | `deep-security-scan` | The user wants an exhaustive or multi-pass audit with explicit worker and time budgets, especially when variants could hide from a single pass. | `codex_security_start_deep_scan`, `subagent`, `codex_security_record_candidate_validations`, `codex_security_complete_scan` |
 | `fix-finding` | The user wants a minimal patch and static test plan for one confirmed finding, without modifying the target repository. | `codex_security_list_findings`, `codex_security_set_finding_remediation`, `codex_security_save_artifact` |
 | `verify-fix` | The user wants to know whether an applied fix actually closes a finding, using a fresh scan and a scan comparison. | `codex_security_start_standard_scan`, `codex_security_compare_scans`, `codex_security_set_finding_triage` |
@@ -22,13 +22,13 @@ This directory contains the ten agent skills that ship with the Codex Security p
 Every scan follows the same lifecycle so the result is reviewable and reproducible:
 
 1. `codex_security_inspect_setup` reads the plugin configuration and state directory.
-2. `codex_security_inspect_target` binds the target, revision, and scope.
-3. `codex_security_start_standard_scan`, `codex_security_start_prompt_only_scan`, or `codex_security_start_deep_scan` creates a scan and returns its `scanId`.
+2. `codex_security_inspect_target` previews the target, revision, and scope.
+3. `codex_security_start_scan` or a mode-specific start tool binds the scan and returns its `scanId`.
 4. `codex_security_record_discovery_candidates` checkpoints leads as they are found.
 5. `codex_security_record_candidate_validations` and `codex_security_record_candidate_attack_paths` settle each lead.
 6. `codex_security_save_artifact` stores per-finding writeups at `findings/<slug>/<slug>.md` and other evidence under the scan.
 7. `codex_security_record_scan_draft` checkpoints findings and coverage; `complete: false` is allowed while work is in progress.
-8. `codex_security_complete_scan` seals `findings.json`, `coverage.json`, `scan-manifest.json`, and `report.md`.
+8. For a diff, prepare and update every bound review item. Complete the draft and coverage, then `codex_security_complete_scan` seals the artifacts. Saved evidence is immutable after completion.
 9. `codex_security_export_findings` writes SARIF, JSON, CSV, or Markdown when the user asks.
 
 ## Tool quick reference
@@ -38,17 +38,18 @@ Setup and inventory:
 | Tool | Purpose |
 | --- | --- |
 | `codex_security_inspect_setup` | Read configuration, state directory, counters, Git availability, and registered skills. |
-| `codex_security_inspect_target` | Bind the target and return revisions, inventory sampling, and diff context. |
+| `codex_security_inspect_target` | Preview the target, revisions, inventory, and diff context. |
 
 Scan lifecycle:
 
 | Tool | Purpose |
 | --- | --- |
+| `codex_security_start_scan` | Create a scan using the configured or supplied mode. |
 | `codex_security_start_standard_scan` | Create a standard scan for a target and scope. |
 | `codex_security_start_prompt_only_scan` | Create a prompt-only scan that returns instructions for an agent-driven pass. |
 | `codex_security_start_deep_scan` | Create a deep scan with workers and discovery budgets. |
 | `codex_security_get_scan_context` | Read the stored context, budget, and progress for a scan. |
-| `codex_security_update_scan_context` | Update notes, threat model, or include and exclude paths. |
+| `codex_security_update_scan_context` | Update notes or the threat model; the bound scope is fixed. |
 | `codex_security_update_scan_progress` | Record the current phase, note, or discovery pass. |
 | `codex_security_complete_scan` | Seal the scan and write the canonical artifacts. |
 | `codex_security_fail_scan` | Mark a scan failed for an unrecoverable blocker. |
@@ -83,6 +84,7 @@ Findings, review, and comparison:
 | `codex_security_export_findings` | Export findings as SARIF, JSON, CSV, or Markdown. |
 | `codex_security_prepare_review_items` | Prepare per-file review items for a diff scan. |
 | `codex_security_list_review_items` | List review items for a scan. |
+| `codex_security_update_review_item` | Record a disposition for a bound diff file. |
 | `codex_security_compare_scans` | Compare two scans and report closed, open, and new findings. |
 
 ## Safety model
@@ -96,18 +98,18 @@ Findings, review, and comparison:
 
 ## Deep scan budgets
 
-Deep scans are bounded by the values passed to `codex_security_start_deep_scan` or the plugin configuration:
+Deep scans record values passed to `codex_security_start_deep_scan` or the plugin configuration. The agent workflow is responsible for following them; the host does not launch workers or enforce these budgets:
 
 | Budget | Default | Meaning |
 | --- | --- | --- |
 | `workers` | `deepWorkers`, default 4 | Maximum concurrent discovery workers per pass. |
 | `maxDiscoveryRuns` | `deepMaxDiscoveryRuns`, default 40 | Maximum discovery passes. |
 | `stopAfterNoNew` | 4 | Stop after this many consecutive passes with no new candidate. |
-| `maxTimeMinutes` | User-supplied | Stop when the elapsed campaign time reaches this value. |
+| `maxTimeMinutes` | 360 | Stop when the elapsed campaign time reaches this value. |
 
 ## Configuration
 
-The plugin reads its configuration from the DeepSeek Harness plugin settings. The values skills rely on are `stateDir` (where sealed scans live), `maxFiles` and `maxFileBytes` (inventory caps), `defaultMode`, `failOnSeverity`, `allowExportOutsideWorkspace`, `maxScanAgeDays`, `deepWorkers`, and `deepMaxDiscoveryRuns`. Change them in the plugin settings UI, not from inside a skill.
+The plugin reads its configuration from the DeepSeek Harness plugin settings. The values skills rely on are `stateDir`, `maxFiles` (inventory cap), `maxFileBytes` (evidence-line read cap), `defaultMode`, `failOnSeverity`, `allowExportOutsideWorkspace`, `maxScanAgeDays`, `deepWorkers`, and `deepMaxDiscoveryRuns`. Change them in the plugin settings UI, not from inside a skill.
 
 ## Skill file format
 

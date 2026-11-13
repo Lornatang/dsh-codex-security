@@ -7,7 +7,7 @@
       "minLength": 1,
       "pattern": "[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
     },
-    "scanId": { "type": "string", "format": "uuid" },
+    "scanId": { "type": "string", "anyOf": [{ "format": "uuid" }, { "pattern": "^cs_[a-f0-9]{24}$" }] },
     "repositoryPath": {
       "type": "string",
       "minLength": 1,

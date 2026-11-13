@@ -13,6 +13,7 @@ export interface ResolvedTarget {
     scope: ScopeInfo;
     inventory: InventoryInfo;
     files: string[];
+    diffFiles?: DiffSnapshot['files'];
     warnings: string[];
 }
 export declare function resolveTarget(options: ResolveTargetOptions): Promise<ResolvedTarget>;

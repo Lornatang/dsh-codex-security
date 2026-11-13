@@ -1,166 +1,60 @@
 # dsh-codex-security
 
-Agent-native security review workbench for DeepSeek Harness (DSH), modeled on
-[OpenAI codex-security](https://github.com/openai/codex-security): an agent performs a
-**static security review** of a repository, records its evidence and coverage as **sealed
-scan artifacts**, and produces reviewable findings with stable ids, triage state and
-SARIF/JSON/CSV/Markdown export.
+An agent-native, static security review workbench for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). It combines host tools, bundled skills, a local scan store and a web workbench. The scan and artifact model is adapted from [OpenAI codex-security](https://github.com/openai/codex-security); this is an independent community project.
 
-Requires **DeepSeek Harness >= 0.2.2-rc.2** and **Node.js >= 22.19**.
+The npm package is [`@lornatang/dsh-codex-security`](https://www.npmjs.com/package/@lornatang/dsh-codex-security). The 0.1.1 source contains fixes that are not present in the published 0.1.0 package. The host integration is tested against DSH 0.2.2-rc.2 and requires Node.js 22.19 or later.
 
-Published on npm as [`@lornatang/dsh-codex-security`](https://www.npmjs.com/package/@lornatang/dsh-codex-security).
+## What it does
 
-> This is an independent community project. It is not affiliated with or endorsed by
-> OpenAI or DeepSeek. The artifact contracts, skill workflows and scan/report model are
-> adapted from OpenAI codex-security under the Apache License 2.0 — see [NOTICE](NOTICE).
+- Binds a repository, directory, scoped path or Git diff to a scan and records a content-based snapshot of the reviewable files.
+- Exposes 29 `codex_security_*` host tools and 10 bundled skills for discovery, validation, coverage, triage, exports and comparison.
+- Records the complete changed-file list for a diff, including untracked files when the working tree is in scope. Each bound file needs a disposition before sealing.
+- Requires an explicitly complete draft and nonempty coverage before sealing. It rejects unresolved candidates unless they are explicitly deferred in coverage, and rejects a target that changed after binding.
+- Seals findings, coverage, a report, SARIF and a manifest containing SHA-256 hashes. Supporting artifacts cannot be added or changed after completion; triage records remain separately editable.
+- Compares completed scans only when their target, mode, scope and coverage are compatible. A disappeared fingerprint is a comparison result, not proof of a fix.
+- Presents scans, findings, coverage and downloads in **Settings → Codex Security**.
 
-## What it is
+Deep scans store worker and discovery budgets and provide an agent workflow for using them. The host does not itself launch workers or enforce the time and stopping budgets. Review quality and coverage still depend on the agent and evidence recorded.
 
-DSH plugins can expose host tools, skills, HTTP routes and client UI. This plugin uses all
-four to turn a security review into a structured, auditable artifact set:
-
-- The agent binds a target (repository, scoped path, worktree or diff), inventories the
-  reviewable text files and creates a scan record.
-- The bundled skills (`$security-scan`, `$security-diff-scan`, `$deep-security-scan`, ...)
-  tell the agent how to review source as untrusted data, validate candidates and write
-  coverage surfaces.
-- The agent records candidates, validations, attack paths and a draft through host tools.
-- Completing the scan **seals** `findings.json`, `coverage.json`, `scan-manifest.json` and
-  `report.md` in the profile's state directory, with sha256 hashes in the manifest.
-- Findings keep stable fingerprints across scans, so fixes can be verified and regressions
-  detected by comparing two scans.
-
-Nothing is uploaded: the plugin works on local files only, and it does not build, execute
-or test the repository it reviews.
-
-## Features
-
-- **Sealed scans** — every completed scan produces the findings/coverage/manifest contract
-  plus a human report; only `completed` scans are sealed. Failed and canceled scans keep
-  their record and do not produce a seal.
-- **Three scan modes** — `standard` (single evidence-driven pass), `prompt-only` (intake and
-  report skeleton without orchestration semantics) and `deep` (repeated passes with a
-  worker/discovery budget recorded on the scan).
-- **27 host tools** — `codex_security_*` tools for setup, targets, lifecycle, evidence,
-  findings/triage, review items, export and scan comparison.
-- **10 skills** — agent workflows registered from `skills/` at plugin load.
-- **Deep-scan orchestration** — worker count, discovery-run budget, stop-after-no-new and a
-  time limit; candidates, validations and attack paths are persisted between passes.
-- **Diff review** — binds a commit range, branch or working tree and records one review item
-  per changed file (`prepare_review_items` / `list_review_items`).
-- **Fix verification** — `compare_scans` classifies findings as closed, open or new by
-  fingerprint between a base and a head scan.
-- **Exports** — SARIF 2.1.0, JSON, CSV and Markdown, written under the state directory by
-  default; `failOnSeverity` records a policy gate result on completion and export.
-- **Web workbench** — a **Codex Security** settings section ("代码安全" in Chinese) lists
-  scans, shows findings with severity chips and triage state, coverage surfaces and export
-  links.
-- **Local-only state** — scans live under the profile's data directory and can be deleted
-  like any other profile data.
-
-## Installation
-
-Install the package into the DSH profile you use:
+## Install
 
 ```bash
-dsh plugin --profile <profile> add @lornatang/dsh-codex-security
+dsh plugin --profile <profile> add github:Lornatang/dsh-codex-security
 ```
 
-Replace `<profile>` with your profile name (for example `desktop` or `web`). Then restart
-DSH. If you run the web UI from a terminal, restart it with `dsh web --no-open`.
-
-Once the package is listed in the DSH plugin market ([dshmarket](https://dshmarket.com)),
-you can also install it from **Plugins → Plugin Market** in the DSH web UI, without a CLI
-command. The CLI command above always works.
-
-Uninstall with:
+Use the profile that runs the plugin, then restart DSH. The npm installation command can be used once a release containing these fixes is published. To remove the plugin:
 
 ```bash
 dsh plugin --profile <profile> remove @lornatang/dsh-codex-security
 ```
 
+The plugin needs the DSH `tools` and `skills` services. If either is absent, Cordis waits for the service before starting the plugin.
+
 ## Quick start
 
-1. Install the plugin and restart DSH (see above).
-2. Open the repository you want reviewed in DSH.
-3. Ask the agent:
+Open the repository in DSH and ask the agent to run a security scan, or invoke `$security-scan`. The agent inspects the target, starts a scan, records its findings and coverage, then completes the scan. Review the result in **Settings → Codex Security** or export it with `codex_security_export_findings`.
 
-   ```text
-   Run a security scan of this repository.
-   ```
+Use `$security-diff-scan` for a Git change and `$deep-security-scan` for an agent-driven, multi-pass review. Diff scans accept `diffTarget`, `workingTree`, or both. The working-tree option includes staged, unstaged and untracked changes. A revision-only diff is bound to immutable Git revisions; inspect the bound revision when reading its source.
 
-   Or invoke the skill directly:
+## Tools and skills
 
-   ```text
-   $security-scan
-   ```
-
-4. The agent inspects the environment (`codex_security_inspect_setup`), binds the target
-   (`codex_security_inspect_target`), starts a scan and reviews source. When it is done it
-   records a draft and seals the scan with `codex_security_complete_scan`.
-5. Review the result in **Settings → Codex Security**, or ask the agent to list scans,
-   findings and coverage. Export with `codex_security_export_findings`.
-
-Common variants:
-
-```text
-$security-diff-scan        # review a PR, commit range, branch or working-tree diff
-$deep-security-scan        # exhaustive, multi-pass scan with a discovery budget
-```
-
-The agent may also propose a review directly, for example *"Review my uncommitted changes
-for security regressions"*.
-
-## How it differs from codex-security
-
-| | OpenAI codex-security | dsh-codex-security |
-| --- | --- | --- |
-| Runs in | Codex app / CLI / MCP | DeepSeek Harness plugin (host tools, skills, HTTP routes, web UI) |
-| Agent interface | codex-security commands and skills | 27 `codex_security_*` tools + 10 DSH skills |
-| Orchestration | Codex agent workflow | DSH agent workflow; deep-scan workers and discovery budget are recorded on the scan |
-| Artifacts | Upstream scan-artifact contract | Same findings/coverage/manifest contracts, adapted ids (`cs_*`, `csf_*`, `occ_*`) and DSH-specific fingerprint rules |
-| Cloud service | No cloud required | No cloud service, no telemetry, no uploads |
-| Code execution | Static review | Static review only: the target is never built, executed or tested |
-| Patching | Agent-assisted fixes | The plugin never applies patches; fix skills guide the agent, and `compare_scans` verifies the result |
-
-## Tools at a glance
-
-All tools return a JSON object rendered as pretty JSON. Full reference:
-[docs/TOOLS.md](docs/TOOLS.md).
+All tools accept a JSON object and return JSON. The complete parameter and error reference is in [docs/TOOLS.md](docs/TOOLS.md).
 
 | Group | Tools | Count |
-| --- | --- | --- |
-| Setup & target | `inspect_setup`, `inspect_target` | 2 |
-| Scan lifecycle | `start_standard_scan`, `start_prompt_only_scan`, `start_deep_scan`, `get_scan_context`, `update_scan_context`, `update_scan_progress`, `complete_scan`, `fail_scan`, `cancel_scan` | 9 |
-| Evidence & draft | `record_scan_draft`, `record_discovery_candidates`, `list_candidates`, `record_candidate_validations`, `record_candidate_attack_paths`, `save_artifact`, `read_artifact` | 7 |
-| Findings & review | `list_scans`, `get_scan`, `list_findings`, `set_finding_triage`, `set_finding_remediation`, `prepare_review_items`, `list_review_items` | 7 |
-| Export & verification | `export_findings`, `compare_scans` | 2 |
+| --- | --- | ---: |
+| Setup and target | `inspect_setup`, `inspect_target` | 2 |
+| Scan lifecycle | `start_scan`, `start_standard_scan`, `start_prompt_only_scan`, `start_deep_scan`, `get_scan_context`, `update_scan_context`, `update_scan_progress`, `complete_scan`, `fail_scan`, `cancel_scan` | 10 |
+| Evidence and drafts | `record_scan_draft`, `record_discovery_candidates`, `list_candidates`, `record_candidate_validations`, `record_candidate_attack_paths`, `save_artifact`, `read_artifact` | 7 |
+| Findings and review | `list_scans`, `get_scan`, `list_findings`, `set_finding_triage`, `set_finding_remediation`, `prepare_review_items`, `list_review_items`, `update_review_item` | 8 |
+| Export and comparison | `export_findings`, `compare_scans` | 2 |
 
-All names are prefixed `codex_security_` (for example
-`codex_security_start_standard_scan`).
+Tool names have the `codex_security_` prefix. The generic `start_scan` tool uses `defaultMode` unless a mode is supplied; the three named start tools always use their named mode.
 
-## Skills
-
-| Skill | Purpose |
-| --- | --- |
-| `security-scan` | Full repository or scoped-path security review, sealed as a scan |
-| `security-diff-scan` | Security review of a PR, commit, branch or working-tree diff |
-| `deep-security-scan` | Exhaustive multi-pass scan with discovery workers and budgets |
-| `fix-finding` | Turn a validated finding into a minimal, validated code change |
-| `verify-fix` | Re-scan and compare against the base scan to prove a fix |
-| `triage-finding` | Record triage status and notes for a finding |
-| `threat-model` | Create or update a repository threat model |
-| `track-findings` | Track findings across scans (open/closed/new) |
-| `resolve-dependency-alert` | Investigate and remediate a dependency advisory |
-| `vulnerability-writeup` | Write a disclosure-quality vulnerability report |
-
-Skills are registered at runtime from `skills/<name>/SKILL.md`.
+The bundled workflows are `security-scan`, `security-diff-scan`, `deep-security-scan`, `fix-finding`, `verify-fix`, `triage-finding`, `threat-model`, `track-findings`, `resolve-dependency-alert` and `vulnerability-writeup`. See [skills/README.md](skills/README.md) for their intended use.
 
 ## Configuration
 
-Configure the plugin in your DSH profile patch
-(`$DSH_HOME/profiles/<profile>/cordis.patch.yml`, default home `~/.dsh`) under the
-`codex-security` plugin row:
+Configure the `codex-security` row in the DSH profile patch at `$DSH_HOME/profiles/<profile>/cordis.patch.yml` (the default DSH home is `~/.dsh`):
 
 ```yaml
 - id: codex-security
@@ -170,91 +64,52 @@ Configure the plugin in your DSH profile patch
     failOnSeverity: high
 ```
 
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `stateDir` | string (absolute path) | `""` | Override the scan state directory. Empty means `<profile data>/codex-security`. |
-| `maxFiles` | integer, 1–200000 | `5000` | Inventory cap per scan. |
-| `maxFileBytes` | integer, 1024–67108864 | `1048576` | Maximum bytes read from a single file. |
-| `defaultMode` | `standard` \| `prompt-only` \| `deep` | `standard` | Mode used when a start tool omits `mode`. |
-| `failOnSeverity` | `informational` \| `low` \| `medium` \| `high` \| `critical` \| `off` | `high` | Policy gate threshold reported on completion and export. |
-| `allowExportOutsideWorkspace` | boolean | `false` | Permit export paths outside the working directory and state directory. |
-| `maxScanAgeDays` | integer, 1–3650 | `30` | Retention hint used by the workbench. |
-| `deepWorkers` | integer, 1–32 | `4` | Default deep-scan worker count. |
-| `deepMaxDiscoveryRuns` | integer, 1–10000 | `40` | Default deep-scan discovery-run budget. |
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `stateDir` | `""` | Scan storage override; empty uses the profile data directory. |
+| `maxFiles` | `5000` | Maximum reviewable files included in the inventory. |
+| `maxFileBytes` | `1048576` | Maximum bytes read for deriving a source evidence line. Snapshot hashes stream file contents. |
+| `defaultMode` | `standard` | Default for `codex_security_start_scan`: `standard`, `prompt-only` or `deep`. |
+| `failOnSeverity` | `high` | Severity threshold recorded in the policy result; `off` disables it. |
+| `allowExportOutsideWorkspace` | `false` | Permit explicit exports outside the workspace and state directory. |
+| `maxScanAgeDays` | `30` | Age threshold for the workbench warning; it does not delete scans. |
+| `deepWorkers` | `4` | Default worker budget recorded for a deep scan. |
+| `deepMaxDiscoveryRuns` | `40` | Default discovery-run budget recorded for a deep scan. |
 
-## What a scan produces
+## Scan artifacts
 
-A completed scan stores its artifacts under
-`<stateDir>/repositories/<repoKey>/scans/<scanId>/`:
+A scan lives under `<stateDir>/repositories/<repoKey>/scans/<scanId>/`. A completed scan includes `findings.json`, `coverage.json`, `report.md`, `sarif.json` and `scan-manifest.json`. It may also contain a threat model, candidate records, review items, a draft checkpoint and supporting evidence. The manifest hashes the sealed output and supporting artifacts.
 
-```text
-scan.json              # internal record (lifecycle, target, inventory, progress)
-findings.json          # sealed findings contract
-coverage.json          # sealed coverage contract
-scan-manifest.json     # sealed manifest with sha256 hashes of artifacts
-report.md              # human-readable report
-threat-model.md        # optional
-candidates.json        # discovery candidates (deep scans)
-validations.json       # candidate validations
-attack-paths.json      # candidate attack paths
-triage.json            # finding triage/remediation state
-review-items.json      # diff review items
-checkpoints/scan-draft.json
-findings/<slug>/<slug>.md   # agent-saved writeups (scan-relative)
-artifacts/                  # agent-saved coverage receipts and evidence
+The plugin validates findings, coverage and the manifest against the bundled JSON Schemas before sealing. [docs/ARTIFACTS.md](docs/ARTIFACTS.md) describes the fields and [examples/](examples) contains illustrative documents.
+
+## Review boundaries
+
+Target files are treated as untrusted data. The plugin does not build, run or test them, and its skills tell the agent to ignore repository instructions and redact secrets. Those are workflow requirements; the host cannot guarantee that an agent follows them or independently prove an agent's review is exhaustive.
+
+Scan data stays in the configured local state directory. Explicit exports may be written into the workspace or another permitted location; exports into scan storage are rejected. State sharing between multiple DSH processes is unsupported. Snapshot hashing covers inventoried reviewable files and the bound diff list; truncation and unreadable files are reported as limitations.
+
+## Development and documentation
+
+```bash
+npm ci
+npm run typecheck
+npm test
 ```
 
-The contract — fields, id and fingerprint rules, coverage dispositions, manifest hashes,
-report sections and SARIF mapping — is documented in
-[docs/ARTIFACTS.md](docs/ARTIFACTS.md). JSON examples live in [examples/](examples).
-
-## Security model
-
-- **Read-only target.** The plugin lists and reads files and runs read-only git commands.
-  It never writes to the reviewed repository.
-- **Static review only.** It does not build, execute or test the target, and it performs no
-  network requests. Findings are source-backed claims, not runtime proof.
-- **Prompt injection is expected.** Repository content is untrusted data. Skills instruct
-  the agent to treat source, comments, documentation and generated files as data, never as
-  instructions, and the sealed report records that no instruction found in the target was
-  followed.
-- **Secrets are redacted.** Skills require credentials and personal data to be redacted to a
-  short prefix and a length (for example `AKIA…[redacted, 40 chars]`) with only path and
-  line cited; the plugin never contacts services to validate a discovered credential.
-- **Local state.** Scans, findings and exports stay on the local filesystem. Export paths
-  outside the working/state directory require `allowExportOutsideWorkspace: true`.
-- **Explicit exports only.** Everything the plugin writes is under the configured state
-  directory except exports explicitly requested by a tool call.
-
-## Documentation
-
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — package layout, modules, lifecycle, state.
-- [docs/TOOLS.md](docs/TOOLS.md) — all 27 tools with arguments, returns, errors, examples.
-- [docs/ARTIFACTS.md](docs/ARTIFACTS.md) — the findings/coverage/manifest/draft contract.
-- [docs/VALIDATION.md](docs/VALIDATION.md) — acceptance checks and a plugin security checklist.
-- [docs/SPEC.md](docs/SPEC.md) — authoritative implementation specification.
-- [skills/](skills) — agent workflows; [references/](references) — upstream reference material.
-
-## Requirements
-
-- DeepSeek Harness >= 0.2.2-rc.2 with plugin support.
-- Node.js >= 22.19.
-- Git is optional. Git repositories get revision, branch, remote and diff scanning; other
-  directories are reviewed as directory snapshots.
+- [Architecture](docs/ARCHITECTURE.md) — package layout, lifecycle and storage.
+- [Tool reference](docs/TOOLS.md) — all tool parameters and behavior.
+- [Artifact contracts](docs/ARTIFACTS.md) — schemas, identities and exports.
+- [Validation](docs/VALIDATION.md) — automated and isolated host checks.
+- [Specification](docs/SPEC.md) — implementation scope.
+- [Skills](skills/README.md), [schemas](schemas) and [references](references).
 
 ## Troubleshooting
 
-- **No scans in the workbench.** Complete at least one scan, then refresh; check
-  `codex_security_inspect_setup` for the effective `stateDir`.
-- **Diff scan falls back to a directory snapshot.** Diff scans require a git repository and
-  a resolvable base revision.
-- **Export is rejected.** Choose a path inside the working directory or state directory, or
-  enable `allowExportOutsideWorkspace`.
-- **Plugin not loading.** Confirm the profile you installed into is the profile you run, and
-  restart DSH after installation.
+- **Plugin is not active:** verify that the installed and running profiles match, restart DSH, and check that both `tools` and `skills` services are available.
+- **Completion is rejected:** finish the draft, account for coverage and candidates, resolve every diff review item, and start a new scan if the bound target changed.
+- **Comparison is rejected:** use completed scans of the same target, mode and scope with comparable, non-deferred coverage.
+- **Export is rejected:** choose an allowed path outside scan storage or enable `allowExportOutsideWorkspace` for an explicit external export.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). The NOTICE records the adaptation
-from OpenAI codex-security (Apache-2.0); the DSH host plugin, tools, storage, routing and
-client workbench are an independent re-implementation against those contracts.
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for attribution and adaptation details.

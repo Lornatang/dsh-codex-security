@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
+import { join } from 'node:path'
 
 const run = promisify(execFile)
 const MAX_BUFFER = 64 * 1024 * 1024
@@ -77,13 +79,20 @@ export async function changedFiles(root: string, options: { base?: string; stage
   const args: string[] = ['diff', '--name-status', '-z', '--find-renames']
   if (options.staged) args.push('--cached')
   if (options.base) {
-    const resolved = await resolveRevision(root, options.base) ?? options.base
-    args.push(resolved + '...HEAD')
+    const resolved = await resolveRevision(root, options.base)
+    if (!resolved) throw new Error('codex-security: invalid diff base: ' + options.base)
+    if (options.workingTree) {
+      const mergeBase = await gitString(root, ['merge-base', resolved, 'HEAD'])
+      if (!mergeBase) throw new Error('codex-security: cannot resolve merge base: ' + options.base)
+      args.push(mergeBase)
+    } else {
+      args.push(resolved + '...HEAD')
+    }
   } else if (!options.staged) {
     args.push('HEAD')
   }
   const result = await git(root, args)
-  if (!result.ok) return []
+  if (!result.ok) throw new Error('codex-security: git diff failed: ' + result.stderr.trim())
   const parts = result.stdout.split('\u0000').filter(Boolean)
   const files: ChangedFile[] = []
   for (let i = 0; i < parts.length; i++) {
@@ -97,6 +106,12 @@ export async function changedFiles(root: string, options: { base?: string; stage
       files.push({ status: status.charAt(0), path: next ?? path, oldPath: path })
     } else {
       files.push({ status: status.charAt(0), path })
+    }
+  }
+  if (options.workingTree && !options.staged) {
+    const seen = new Set(files.map((file) => file.path))
+    for (const entry of await statusEntries(root)) {
+      if (entry.code === '??' && !seen.has(entry.path)) files.push({ status: 'A', path: entry.path })
     }
   }
   return files
@@ -114,15 +129,15 @@ export async function worktreeDigest(root: string): Promise<string> {
   const untracked = await git(root, ['ls-files', '--others', '--exclude-standard', '-z'])
   if (untracked.ok) {
     const names = untracked.stdout.split('\u0000').filter(Boolean).sort()
-    hash.update('untracked\u0000' + names.join('\u0000'))
+    for (const name of names) hash.update('untracked\u0000' + name + '\u0000' + (await fileDigest(join(root, name)) ?? 'unavailable'))
   }
   return hash.digest('hex')
 }
 
 export async function fileDigest(path: string): Promise<string | undefined> {
-  const { createHash: create } = await import('node:crypto')
-  const { readFile } = await import('node:fs/promises')
   try {
-    return create('sha256').update(await readFile(path)).digest('hex')
+    const hash = createHash('sha256')
+    for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer)
+    return hash.digest('hex')
   } catch { return undefined }
 }

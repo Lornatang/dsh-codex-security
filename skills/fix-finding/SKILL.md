@@ -46,13 +46,13 @@ Do not use `blocked` because the work is large; size is a reason to propose a de
 
 ## 4. Build the patch artifact
 
-Write a unified diff with `a/` and `b/` prefixes and repository-relative paths, and save it with `codex_security_save_artifact` at `patches/<slug>.patch` where `<slug>` is a lowercase kebab-case name derived from the finding. Include only the files the fix needs. Add a short header comment describing the invariant being enforced and the caller set covered. Do not include generated files, formatting-only hunks, or unrelated changes.
+Write a unified diff with `a/` and `b/` prefixes and repository-relative paths. If there is a running scan for the same target, save it with `codex_security_save_artifact` at `patches/<slug>.patch`; otherwise present the patch in the response. Completed scans are immutable. Include only the files the fix needs. Add a short header comment describing the invariant being enforced and the caller set covered. Do not include generated files, formatting-only hunks, or unrelated changes.
 
 If the fix is a configuration or policy change rather than code, still express it as a diff against the configuration file and say so in the remediation text.
 
 ## 5. Build the test artifact
 
-Save a proposed test at `tests/<slug>-test.md` with `codex_security_save_artifact`. Include the test code or the exact assertion strategy, the file it would live in, the fixtures required, the command that would run it, and the negative cases: alternate encodings, boundary values, missing authentication, and at least one legitimate input that must keep working. Mark clearly that the test was not executed, because this workflow is static and read-only. When the repository has no test framework for that area, provide a manual verification procedure instead.
+Prepare a proposed test. Save it at `tests/<slug>-test.md` only on a running scan for the same target; otherwise include it in the response. Include the test code or the exact assertion strategy, the file it would live in, the fixtures required, the command that would run it, and the negative cases: alternate encodings, boundary values, missing authentication, and at least one legitimate input that must keep working. Mark clearly that the test was not executed, because this workflow is static and read-only. When the repository has no test framework for that area, provide a manual verification procedure instead.
 
 ## 6. Record the remediation
 

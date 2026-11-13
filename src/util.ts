@@ -122,6 +122,14 @@ export function matchesAny(relPath: string, patterns: string[]): boolean {
   return false
 }
 
+/** Match either a directory path and its descendants, or an explicit glob. */
+export function matchesScopePath(relPath: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => {
+    const clean = pattern.replace(/^\.\//, '').replace(/\/$/, '')
+    return clean === '' || clean === '.' || relPath === clean || relPath.startsWith(clean + '/') || matchesAny(relPath, [pattern])
+  })
+}
+
 const BINARY_EXTENSIONS = new Set(['.png','.jpg','.jpeg','.gif','.webp','.ico','.pdf','.zip','.gz','.tgz','.bz2','.xz','.7z','.tar','.jar','.war','.class','.so','.dylib','.dll','.exe','.bin','.woff','.woff2','.ttf','.otf','.eot','.mp3','.mp4','.mov','.webm','.wasm','.sqlite','.db','.pyc','.o','.a','.node','.snap','.avif','.bmp'])
 
 export function isProbablyBinary(path: string): boolean {
@@ -167,7 +175,7 @@ export function formatBytes(value: number): string {
   return (value / (1024 * 1024)).toFixed(1) + ' MB'
 }
 
-export async function listFiles(root: string, options: { maxFiles: number; exclude: string[]; include?: string[]; followSymlinks?: boolean }): Promise<{ files: string[]; truncated: boolean; excluded: string[] }> {
+export async function listFiles(root: string, options: { maxFiles: number; exclude: string[]; include?: string[]; filter?: (path: string) => boolean; followSymlinks?: boolean }): Promise<{ files: string[]; truncated: boolean; excluded: string[] }> {
   const files: string[] = []
   const excluded: string[] = []
   let truncated = false
@@ -186,7 +194,8 @@ export async function listFiles(root: string, options: { maxFiles: number; exclu
       if (entry.isSymbolicLink()) { excluded.push(rel); continue }
       if (entry.isDirectory()) { await walk(join(dir, entry.name), rel); continue }
       if (!entry.isFile()) continue
-      if (options.include && options.include.length > 0 && !matchesAny(rel, options.include)) continue
+      if (options.include && options.include.length > 0 && !matchesScopePath(rel, options.include)) continue
+      if (options.filter && !options.filter(rel)) continue
       if (files.length >= options.maxFiles) { truncated = true; return }
       files.push(rel)
     }

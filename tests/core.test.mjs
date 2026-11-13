@@ -80,7 +80,7 @@ test('apply registers the documented tool surface and bundled skills', async () 
   const stateDir = await tempDir('dcs-state-')
   const ctx = mockContext(join(stateDir, 'cordis.patch.yml'))
   apply(ctx, { stateDir })
-  assert.equal(ctx.registeredTools.length, 27)
+  assert.equal(ctx.registeredTools.length, 29)
   const names = ctx.registeredTools.map((tool) => tool.name).sort()
   assert.deepEqual(names, [...TOOL_NAMES].sort())
   for (const tool of ctx.registeredTools) {
@@ -178,6 +178,10 @@ test('scan lifecycle seals findings, coverage, report and manifest', async () =>
     assert.match(report, /CWE-89/)
 
     const second = await service.startScan({ targetPath: target }, 'standard')
+    const artifact = await service.saveArtifact({ scanId: second.scanId, path: 'artifacts/notes/evidence.md', content: '# evidence\n', mediaType: 'text/markdown' })
+    assert.match(artifact.artifact.path, /^artifacts\/notes\/evidence\.md$/)
+    const writeup = await service.saveArtifact({ scanId: second.scanId, path: 'findings/xss-login/xss-login.md', content: '# XSS\n', mediaType: 'text/markdown' })
+    assert.match(writeup.artifact.path, /^findings\/xss-login\/xss-login\.md$/)
     await service.recordScanDraft({ scanId: second.scanId, draft: sampleDraft(second.scanId) })
     await service.completeScan({ scanId: second.scanId })
     const comparison = await service.compareScans({ baseScanId: started.scanId, headScanId: second.scanId })
@@ -200,10 +204,6 @@ test('scan lifecycle seals findings, coverage, report and manifest', async () =>
     assert.equal(exportedSarif.version, '2.1.0')
     assert.equal(exportedSarif.runs[0].results.length, 1)
 
-    const artifact = await service.saveArtifact({ scanId: second.scanId, path: 'artifacts/notes/evidence.md', content: '# evidence\n', mediaType: 'text/markdown' })
-    assert.match(artifact.artifact.path, /^artifacts\/notes\/evidence\.md$/)
-    const writeup = await service.saveArtifact({ scanId: second.scanId, path: 'findings/xss-login/xss-login.md', content: '# XSS\n', mediaType: 'text/markdown' })
-    assert.match(writeup.artifact.path, /^findings\/xss-login\/xss-login\.md$/)
     const read = await service.readArtifact({ scanId: second.scanId, path: 'findings/xss-login/xss-login.md' })
     assert.match(read.content, /# XSS/)
 

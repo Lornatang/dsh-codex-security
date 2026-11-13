@@ -47,7 +47,7 @@ Flag high and critical open findings first. Do not average severity into a singl
 
 ## 5. Save the summary artifact
 
-Write `tracking/summary-<yyyy-mm-dd>.md` and save it with `codex_security_save_artifact` on the most recent scan in the window (or the scan the user specified). Include the scan ids and dates, the tables above, the comparison results, stale items, and explicit limitations such as unreviewed scans. Keep it concise enough to skim; link evidence by path and finding id rather than pasting large excerpts. If there is no scan to attach the artifact to, deliver the same summary in chat and offer to start a scan that can own it.
+Write a concise tracking summary. Save `tracking/summary-<yyyy-mm-dd>.md` only on a running scan for the same target; completed scan artifacts are immutable. Otherwise deliver the summary in chat. Include the scan ids and dates, the tables above, the comparison results, stale items, and explicit limitations such as unreviewed scans. Keep it concise enough to skim; link evidence by path and finding id rather than pasting large excerpts. If there is no scan to attach the artifact to, deliver the same summary in chat and offer to start a scan that can own it.
 
 ## 6. Export when requested
 

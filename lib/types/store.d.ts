@@ -12,6 +12,7 @@ export interface CreateScanInput {
     target: ScanRecord['target'];
     scope: ScanRecord['scope'];
     inventory: ScanRecord['inventory'];
+    diffFiles?: ScanRecord['diffFiles'];
     budget?: ScanRecord['budget'];
     notes?: string;
     threatModel?: ScanRecord['threatModel'];
@@ -31,6 +32,7 @@ export declare class ScanStore {
     init(): Promise<void>;
     private serialize;
     loadIndex(): Promise<ScanIndex>;
+    private rebuildIndex;
     saveIndex(index: ScanIndex): Promise<void>;
     create(input: CreateScanInput): Promise<ScanRecord>;
     private writeRecord;

@@ -58,7 +58,7 @@ interface CoverageDocument {
   deferred?: { id?: string; reason?: string }[]
   openQuestions?: { question?: string }[]
 }
-interface StatusResponse { version?: string; stateDir?: string; scans?: number; findings?: number }
+interface StatusResponse { version?: string; stateDir?: string; scans?: number; findings?: number; config?: { maxScanAgeDays?: number } }
 interface ScansResponse { scans?: ScanSummary[]; total?: number }
 interface ScanDetailResponse { scan?: ScanRecord; findings?: Finding[]; coverage?: CoverageDocument | null; artifacts?: ArtifactInfo[] }
 interface FindingsResponse { total?: number }
@@ -306,9 +306,9 @@ function FindingsTable(props: { scanId: string; findings: Finding[]; busyFinding
 
 function ScanDetailPanel(props: {
   detail: ScanDetailResponse | null; selectedId: string | null; loading: boolean; error: string | null
-  busyFindingId: string | null; now: number; onTriage: (scanId: string, findingId: string, status: FindingStatus) => void
+  busyFindingId: string | null; now: number; maxScanAgeDays?: number; onTriage: (scanId: string, findingId: string, status: FindingStatus) => void
 }) {
-  const { detail, selectedId, loading, error, busyFindingId, now, onTriage } = props
+  const { detail, selectedId, loading, error, busyFindingId, now, maxScanAgeDays, onTriage } = props
   if (!selectedId) return <Panel title="Scan detail"><p className="dcs-empty">Select a scan above to inspect its findings, coverage, and artifacts.</p></Panel>
   if (!detail) return <Panel title="Scan detail">{loading ? <Spinner label="Loading scan details" /> : <p className="dcs-empty">{error ?? 'Scan details are unavailable.'} Use Retry to try again.</p>}</Panel>
   const scan = detail.scan ?? { scanId: selectedId }
@@ -353,6 +353,7 @@ function ScanDetailPanel(props: {
           <span className="dcs-phase">phase: <strong>{progress?.phase ?? 'unknown'}</strong></span>
           {typeof progress?.discoveryRuns === 'number' ? <span>discovery runs: {progress.discoveryRuns}</span> : null}
           <time dateTime={scan.updatedAt} title={absoluteTime(scan.updatedAt)}>updated {relativeTime(scan.updatedAt, now)}</time>
+          {typeof maxScanAgeDays === 'number' && scan.updatedAt && Number.isFinite(Date.parse(scan.updatedAt)) && now - Date.parse(scan.updatedAt) > maxScanAgeDays * 86400000 ? <Chip tone="warn">Older than {maxScanAgeDays} days</Chip> : null}
           {loading ? <span className="dcs-loadingInline" role="status">Refreshing…</span> : null}
         </div>
       </section>
@@ -525,7 +526,7 @@ function Workbench() {
         </div>
       ) : null}
       <ScanList scans={scans} total={scansTotal} selectedId={selectedId} loading={listLoading} now={now} onSelect={selectScan} />
-      <ScanDetailPanel detail={detail} selectedId={selectedId} loading={detailLoading} error={actionError ?? loadError} busyFindingId={busyFindingId} now={now} onTriage={handleTriage} />
+      <ScanDetailPanel detail={detail} selectedId={selectedId} loading={detailLoading} error={actionError ?? loadError} busyFindingId={busyFindingId} now={now} maxScanAgeDays={status?.config?.maxScanAgeDays} onTriage={handleTriage} />
     </section>
   )
 }

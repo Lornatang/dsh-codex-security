@@ -9,6 +9,7 @@ export interface ScanIndex { version: 1; scans: Record<string, ScanSummary & { r
 
 /** Files owned by the seal step; agents cannot overwrite them through save_artifact. */
 const SEALED_FILES = new Set(['scan.json', 'findings.json', 'coverage.json', 'scan-manifest.json', 'sarif.json', 'report.md', 'threat-model.md'])
+const INTERNAL_FILES = new Set([...SEALED_FILES, 'candidates.json', 'validations.json', 'attack-paths.json', 'review-items.json', 'triage.json'])
 
 export interface CreateScanInput {
   scanId: string
@@ -17,6 +18,7 @@ export interface CreateScanInput {
   target: ScanRecord['target']
   scope: ScanRecord['scope']
   inventory: ScanRecord['inventory']
+  diffFiles?: ScanRecord['diffFiles']
   budget?: ScanRecord['budget']
   notes?: string
   threatModel?: ScanRecord['threatModel']
@@ -88,8 +90,23 @@ export class ScanStore {
   async loadIndex(): Promise<ScanIndex> {
     if (this.indexCache) return this.indexCache
     const stored = await readJson<ScanIndex>(this.indexPath)
-    this.indexCache = stored && stored.version === 1 ? stored : { version: 1, scans: {} }
+    this.indexCache = stored && stored.version === 1 ? stored : await this.rebuildIndex()
     return this.indexCache
+  }
+
+  private async rebuildIndex(): Promise<ScanIndex> {
+    const index: ScanIndex = { version: 1, scans: {} }
+    const repos = await readdir(join(this.stateDir, 'repositories')).catch(() => [])
+    for (const repoKey of repos) {
+      const scansDir = join(this.stateDir, 'repositories', repoKey, 'scans')
+      const scanIds = await readdir(scansDir).catch(() => [])
+      for (const scanId of scanIds) {
+        if (!/^cs_[a-f0-9]{24}$/.test(scanId)) continue
+        const record = await readJson<ScanRecord>(join(scansDir, scanId, 'scan.json'))
+        if (record?.scanId === scanId && record.repoKey === repoKey) index.scans[scanId] = { ...summarize(record), repoKey }
+      }
+    }
+    return index
   }
 
   async saveIndex(index: ScanIndex): Promise<void> {
@@ -111,6 +128,7 @@ export class ScanStore {
         target: input.target,
         scope: input.scope,
         inventory: input.inventory,
+        ...(input.diffFiles ? { diffFiles: input.diffFiles } : {}),
         progress: { phase: 'target-bound', notes: [], discoveryRuns: 0, startedAt: timestamp, updatedAt: timestamp },
         ...(input.budget ? { budget: input.budget } : {}),
         ...(input.notes ? { notes: input.notes } : {}),
@@ -192,15 +210,19 @@ export class ScanStore {
   }
 
   async list(): Promise<ScanSummary[]> {
-    const index = await this.loadIndex()
-    return Object.values(index.scans).sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    return this.serialize(async () => {
+      const index = await this.rebuildIndex()
+      await this.saveIndex(index)
+      return Object.values(index.scans).sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    })
   }
 
   async saveArtifact(scanId: string, relativePath: string, content: string, mediaType: string): Promise<{ path: string; bytes: number; sha256: string; mediaType: string }> {
     const found = await this.get(scanId)
     if (!found) throw new Error('codex-security: scan not found: ' + scanId)
+    if (found.record.status !== 'running') throw new Error('codex-security: cannot change artifacts after scan is ' + found.record.status)
     const clean = sanitizeRelative(relativePath)
-    if (SEALED_FILES.has(clean)) throw new Error('codex-security: cannot overwrite sealed artifact path: ' + clean)
+    if (INTERNAL_FILES.has(clean) || clean === 'checkpoints' || clean.startsWith('checkpoints/')) throw new Error('codex-security: cannot overwrite internal scan path: ' + clean)
     const target = joinWithin(found.dir, clean)
     const data = Buffer.from(content, 'utf8')
     await ensureDir(dirname(target))

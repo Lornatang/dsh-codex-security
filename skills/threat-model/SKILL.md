@@ -63,7 +63,7 @@ Save the readable model with `codex_security_save_artifact` at `artifacts/threat
 
 Checkpoint the model with `codex_security_record_scan_draft` using `threatModel` and an empty findings array while the model is still being built, with `complete: false`. Give `reviewState.surfaces` one entry per modeled area with a disposition that matches what you actually did: `no_issue_found` only where you verified the security objective in source, `needs_follow_up` where the model raises questions that require code review, and `rejected` where a scenario is defeated by evidence. Record `deferred` for areas the model does not cover and `openQuestions` for unresolved architecture questions.
 
-Complete the scan with `codex_security_complete_scan` only when the model is the scan's requested deliverable or the owning scan workflow is ready to seal. In the completion notes, state that the scan produced a threat model and that vulnerability discovery was limited to what the model verified; a completed threat-model scan is not a clean vulnerability scan. If the model belongs to an ongoing scan, leave sealing to the `security-scan` or `deep-security-scan` workflow.
+Complete the scan with `codex_security_complete_scan` only when the model is the scan's requested deliverable or the owning scan workflow is ready to seal. Before sealing, record notes with `codex_security_update_scan_context` stating that the scan produced a threat model and that vulnerability discovery was limited to what the model verified; a completed threat-model scan is not a clean vulnerability scan. If the model belongs to an ongoing scan, leave sealing to the `security-scan` or `deep-security-scan` workflow.
 
 ## 7. Keep the model current
 

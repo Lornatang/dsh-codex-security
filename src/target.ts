@@ -1,8 +1,9 @@
-import { stat } from 'node:fs/promises'
-import { basename, resolve } from 'node:path'
+import { lstat, realpath, stat } from 'node:fs/promises'
+import { basename, relative, resolve, sep } from 'node:path'
+import { createHash } from 'node:crypto'
 import type { InventoryInfo, ScopeInfo, TargetInfo, TargetKind } from './types.js'
-import { ensureDir, isProbablyBinary, languageOf, listFiles, matchesAny, normalizeLine, sha256, truncate } from './util.js'
-import { changedFiles, currentBranch, gitString, headRevision, isGitRepo, remoteUrl, repoRoot, resolveRevision, statusEntries, trackedFiles, worktreeDigest } from './git.js'
+import { isProbablyBinary, languageOf, listFiles, matchesAny, matchesScopePath, normalizeLine, sha256, truncate } from './util.js'
+import { changedFiles, currentBranch, fileDigest, headRevision, remoteUrl, repoRoot, resolveRevision, statusEntries, trackedFiles } from './git.js'
 
 export interface ResolveTargetOptions {
   targetPath?: string
@@ -19,19 +20,30 @@ export interface ResolvedTarget {
   scope: ScopeInfo
   inventory: InventoryInfo
   files: string[]
+  diffFiles?: DiffSnapshot['files']
   warnings: string[]
 }
 
 const DEFAULT_EXCLUDES = ['.git/**','node_modules/**','dist/**','build/**','out/**','coverage/**','.next/**','.nuxt/**','vendor/**','target/**','.venv/**','__pycache__/**','*.min.js','*.min.css','*.map','*.lock','package-lock.json','pnpm-lock.yaml','yarn.lock','Cargo.lock','poetry.lock','uv.lock','composer.lock','go.sum']
-const LOCKFILES = new Set(['package-lock.json','pnpm-lock.yaml','yarn.lock','Cargo.lock','poetry.lock','uv.lock','composer.lock','go.sum'])
-
 export async function resolveTarget(options: ResolveTargetOptions): Promise<ResolvedTarget> {
-  const requested = resolve(options.targetPath && options.targetPath.length > 0 ? options.targetPath : process.cwd())
+  const requestedPath = resolve(options.targetPath && options.targetPath.length > 0 ? options.targetPath : process.cwd())
+  const targetStat = await stat(requestedPath).catch(() => undefined)
+  if (!targetStat?.isDirectory()) throw new Error('codex-security: targetPath must be an existing directory: ' + requestedPath)
+  const requested = await realpath(requestedPath)
   const repo = await repoRoot(requested)
   const rootPath = repo ?? requested
-  await ensureDir(rootPath)
   const gitRepo = repo !== undefined
-  const includePaths = (options.includePaths ?? []).map((value) => value.trim()).filter(Boolean)
+  const requestedIncludes = (options.includePaths ?? []).map((value) => value.trim()).filter(Boolean)
+  const subdir = gitRepo ? relative(rootPath, requested).split(sep).join('/') : ''
+  let includePaths = requestedIncludes
+  if (subdir) {
+    includePaths = requestedIncludes.length === 0 ? [subdir] : requestedIncludes.map((pattern) => {
+      const clean = pattern.replace(/^\.\//, '').replace(/\/$/, '')
+      if (!clean || clean === '.') return subdir
+      if (clean !== subdir && !clean.startsWith(subdir + '/')) throw new Error('codex-security: includePaths must stay within targetPath: ' + pattern)
+      return clean
+    })
+  }
   const excludePaths = (options.excludePaths ?? []).map((value) => value.trim()).filter(Boolean)
   const scope: ScopeInfo = { includePaths: includePaths.length > 0 ? includePaths : ['.'], excludePaths }
   const warnings: string[] = []
@@ -40,49 +52,61 @@ export async function resolveTarget(options: ResolveTargetOptions): Promise<Reso
   const dirty = status.length > 0
   const revision = gitRepo ? await headRevision(rootPath) : undefined
   const baseRevision = options.diffTarget ? await resolveRevision(rootPath, options.diffTarget) : undefined
-  if (options.diffTarget && !baseRevision) warnings.push('diff target could not be resolved: ' + options.diffTarget)
+  if (options.diffTarget && !baseRevision) throw new Error('codex-security: diff target could not be resolved: ' + options.diffTarget)
+  if (!gitRepo && (options.diffTarget || options.workingTree)) throw new Error('codex-security: diff scans require a git repository')
 
   let kind: TargetKind = 'directory_snapshot'
   if (gitRepo) kind = options.diffTarget || options.workingTree ? 'git_diff' : 'git_worktree'
-  if (!gitRepo && options.diffTarget) warnings.push('diff scans require a git repository; falling back to a directory snapshot')
-
-  const files = (await collectFiles(rootPath, options, includePaths, excludePaths, gitRepo)).filter((path) => !isProbablyBinary(path))
+  const diff = kind === 'git_diff' ? await resolveDiff(rootPath, { diffTarget: baseRevision, workingTree: options.workingTree === true }) : undefined
+  const diffFiles = diff?.files.filter((file) =>
+    (matchesScopePath(file.path, scope.includePaths) || (file.oldPath !== undefined && matchesScopePath(file.oldPath, scope.includePaths))) &&
+    !matchesAny(file.path, excludePaths))
+  const changedPaths = diffFiles ? new Set(diffFiles.map((file) => file.path)) : undefined
+  const inventoryFiles = await collectFiles(rootPath, options, includePaths, excludePaths, gitRepo, changedPaths)
+  const files = inventoryFiles.files
   if (files.length === 0) warnings.push('no reviewable text files matched the requested scope')
-  if (files.length >= options.maxFiles) warnings.push('inventory truncated at maxFiles=' + options.maxFiles)
+  if (inventoryFiles.truncated) warnings.push('inventory truncated at maxFiles=' + options.maxFiles)
 
   let totalBytes = 0
   const languages: Record<string, number> = {}
-  const sizes = new Map<string, number>()
   for (const file of files) {
     try {
       const info = await stat(resolve(rootPath, file))
       totalBytes += info.size
-      sizes.set(file, info.size)
     } catch { /* file disappeared between listing and stat */ }
     const language = languageOf(file)
     languages[language] = (languages[language] ?? 0) + 1
   }
 
-  let snapshotDigest: string
-  if (gitRepo && revision) {
-    const digest = options.diffTarget || options.workingTree ? await worktreeDigest(rootPath) : sha256('clean:' + revision)
-    snapshotDigest = 'codex-security-snapshot/v1:sha256:' + digest
-  } else {
-    const hash = sha256(files.map((file) => file + '\u0000' + (sizes.get(file) ?? 0)).join('\n') + '\u0000' + totalBytes)
-    snapshotDigest = 'codex-security-snapshot/v1:sha256:' + hash
+  const snapshot = createHash('sha256')
+  snapshot.update(JSON.stringify({ kind, revision: revision ?? null, baseRevision: baseRevision ?? null, diffFiles: diffFiles ?? null }))
+  // Commit-only diffs are bound to immutable revisions; working-tree and
+  // directory scans must also bind the actual content being reviewed.
+  if (kind !== 'git_diff' || options.workingTree) {
+    for (const file of [...files].sort()) {
+      const absolute = resolve(rootPath, file)
+      const info = await lstat(absolute).catch(() => undefined)
+      const digest = info?.isFile() ? await fileDigest(absolute) : undefined
+      if (!digest) warnings.push('snapshot could not hash file: ' + file)
+      snapshot.update('\u0000' + file + '\u0000' + (digest ?? 'unavailable'))
+    }
   }
+  const snapshotDigest = 'codex-security-snapshot/v1:sha256:' + snapshot.digest('hex')
 
   const targetId = 'target_' + sha256(kind + '\u0000' + rootPath + '\u0000' + (revision ?? '') + '\u0000' + (options.diffTarget ?? '')).slice(0, 24)
+  const remoteValue = gitRepo ? await remoteUrl(rootPath) : undefined
+  const remote = remoteValue ? safeRemote(remoteValue) : undefined
+  const branch = gitRepo ? await currentBranch(rootPath) : undefined
   const target: TargetInfo = {
     kind,
     targetId,
-    displayName: displayNameFor(rootPath, gitRepo ? await remoteUrl(rootPath) : undefined),
+    displayName: displayNameFor(rootPath, remote),
     rootPath,
     snapshotDigest,
     dirty,
-    ...(gitRepo ? { remote: await remoteUrl(rootPath) } : {}),
+    ...(remote ? { remote } : {}),
     ...(revision ? { revision } : {}),
-    ...(gitRepo ? { branch: await currentBranch(rootPath) } : {}),
+    ...(branch ? { branch } : {}),
     ...(options.diffTarget ? { diffTarget: options.diffTarget } : {}),
     ...(options.workingTree ? { workingTree: true } : {}),
     ...(baseRevision ? { baseRevision } : {}),
@@ -97,12 +121,26 @@ export async function resolveTarget(options: ResolveTargetOptions): Promise<Reso
     languages,
     sample,
     excluded: DEFAULT_EXCLUDES,
-    truncated: files.length >= options.maxFiles,
+    truncated: inventoryFiles.truncated,
   }
-  return { target, scope, inventory, files, warnings }
+  return { target, scope, inventory, files, warnings, ...(diffFiles ? { diffFiles } : {}) }
 }
 
-async function collectFiles(rootPath: string, options: ResolveTargetOptions, includePaths: string[], excludePaths: string[], gitRepo: boolean): Promise<string[]> {
+function safeRemote(value: string): string | undefined {
+  try {
+    if (value.includes('://')) {
+      const url = new URL(value)
+      url.username = ''
+      url.password = ''
+      url.search = ''
+      url.hash = ''
+      return url.toString()
+    }
+    return value.split(/[?#]/, 1)[0] || undefined
+  } catch { return undefined }
+}
+
+async function collectFiles(rootPath: string, options: ResolveTargetOptions, includePaths: string[], excludePaths: string[], gitRepo: boolean, changedPaths?: Set<string>): Promise<{ files: string[]; truncated: boolean }> {
   const exclude = [...DEFAULT_EXCLUDES, ...excludePaths]
   if (gitRepo) {
     const tracked = await trackedFiles(rootPath)
@@ -110,13 +148,14 @@ async function collectFiles(rootPath: string, options: ResolveTargetOptions, inc
     const untracked = status.filter((entry) => entry.code === '??').map((entry) => entry.path)
     const all = Array.from(new Set([...tracked, ...untracked]))
     let scoped = all.filter((path) => !matchesAny(path, exclude))
+    if (changedPaths) scoped = scoped.filter((path) => changedPaths.has(path))
     if (includePaths.length > 0 && !(includePaths.length === 1 && (includePaths[0] === '.' || includePaths[0] === './'))) {
-      scoped = scoped.filter((path) => includePaths.some((pattern) => path === pattern || path.startsWith(pattern.replace(/\/$/, '') + '/') || matchesAny(path, [pattern])))
+      scoped = scoped.filter((path) => matchesScopePath(path, includePaths))
     }
-    return scoped.slice(0, options.maxFiles)
+    scoped = scoped.filter((path) => !isProbablyBinary(path))
+    return { files: scoped.slice(0, options.maxFiles), truncated: scoped.length > options.maxFiles }
   }
-  const listed = await listFiles(rootPath, { maxFiles: options.maxFiles, exclude, include: includePaths.filter((value) => value !== '.' && value !== './').length > 0 ? includePaths : undefined })
-  return listed.files
+  return listFiles(rootPath, { maxFiles: options.maxFiles, exclude, include: includePaths.filter((value) => value !== '.' && value !== './').length > 0 ? includePaths : undefined, filter: (path) => !isProbablyBinary(path) })
 }
 
 function displayNameFor(rootPath: string, remote: string | undefined): string {
@@ -134,7 +173,7 @@ export interface DiffSnapshot { files: { status: string; path: string; oldPath?:
 export async function resolveDiff(rootPath: string, options: { diffTarget?: string; staged?: boolean; workingTree?: boolean }): Promise<DiffSnapshot> {
   const head = await headRevision(rootPath)
   const files = await changedFiles(rootPath, { base: options.diffTarget, staged: options.staged, workingTree: options.workingTree })
-  return { files, base: options.diffTarget, head, workingTree: options.workingTree === true || (!options.diffTarget && !options.staged) }
+  return { files, ...(options.diffTarget ? { base: options.diffTarget } : {}), ...(head ? { head } : {}), workingTree: options.workingTree === true || (!options.diffTarget && !options.staged) }
 }
 
 /** Read one source line for anchor derivation without trusting it as instructions. */

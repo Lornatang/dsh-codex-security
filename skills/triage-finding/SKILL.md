@@ -78,7 +78,7 @@ Never downgrade a real finding to `false_positive` to reduce noise, and never us
 
 Call `codex_security_set_finding_triage` with `scanId`, `findingId`, the chosen `status`, and a `note` that states: what was verified, the source evidence (paths and lines), the counterevidence or proof gaps, the practical impact, the actor and preconditions, and the next action or owner. Keep the note factual and self-contained.
 
-If triage required new evidence, save `triage/<slug>.md` with `codex_security_save_artifact` and reference it from the note. Do not attach a new severity, remediation, or attack path through triage; use the dedicated tools or the scan workflow if that work is needed.
+Put new evidence in the triage note, or save `triage/<slug>.md` only on a running scan. Completed scan artifacts are immutable. Do not attach a new severity, remediation, or attack path through triage; use the dedicated tools or the scan workflow if that work is needed.
 
 ## 7. Report back
 
