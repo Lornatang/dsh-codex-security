@@ -25,11 +25,18 @@ Everything lives under the scan directory
 | `attack-paths.json` | `record_candidate_attack_paths` | `application/json` | Attack-path analysis (not sealed) |
 | `triage.json` | triage/remediation tools | `application/json` | Triage state (not sealed) |
 | `review-items.json` | `prepare_review_items` | `application/json` | Diff review items (not sealed) |
-| `artifacts/<path>` | `save_artifact` | caller-supplied, default `text/markdown` | Supporting evidence (sealed into the manifest) |
+| Agent-saved paths (for example `findings/<slug>/<slug>.md`, `patches/<slug>.patch`, `tests/<slug>-test.md`, `verify/<slug>-verification.md`, `tracking/summary-<date>.md`, `dependency-alerts/<pkg>-<advisory>.md`, `triage/<slug>.md`, `artifacts/<path>`) | `save_artifact` | caller-supplied, default `text/markdown` | Supporting evidence; every saved file is sealed into the manifest |
 
 Only files listed in the manifest's `scan.artifacts` array are part of the seal. The draft,
 candidates, validations, attack paths, triage and review items stay mutable local state after
 completion; changing them never changes the sealed documents.
+
+`save_artifact` accepts scan-relative POSIX paths and stores them verbatim under the scan
+directory. Seven files are written by the plugin itself and cannot be replaced through
+`save_artifact`: `scan.json`, `findings.json`, `coverage.json`, `scan-manifest.json`,
+`sarif.json`, `report.md` and `threat-model.md` (all at the scan root). In particular, save a
+supplementary copy of the threat model as `artifacts/threat-model.md`; the sealed
+`threat-model.md` is rendered by `complete_scan` from the scan's threat model.
 
 ## `findings.json`
 
@@ -189,10 +196,12 @@ dirty worktree is `working_tree` and a clean one `repository`.
 | `not_applicable` | The surface does not apply to this target or scope. |
 | `needs_follow_up` | Review is incomplete and requires another scan. |
 
-`receiptRefs` point under `artifacts/` (for example
-`artifacts/findings/xss-login/xss-login.md`). If a completed scan recorded no surfaces, the
-plugin stores `artifacts/scan-summary.md`, records a default surface (id `surface-1`,
-label `repository review`) and adds a warning.
+`receiptRefs` must point under `artifacts/` (for example
+`artifacts/evidence/xss-login-request.txt`); this is validated when the draft is recorded.
+Finding writeups are referenced through `writeup.reportPath` instead, because they live at
+`findings/<slug>/<slug>.md`. If a completed scan recorded no surfaces, the plugin stores
+`artifacts/scan-summary.md`, records a default surface (id `surface-1`, label
+`repository review`) and adds a warning.
 
 ### Example coverage document
 
@@ -210,7 +219,7 @@ label `repository review`) and adds a warning.
       "id": "surface-1",
       "label": "HTTP project routes",
       "disposition": "reported",
-      "receiptRefs": ["artifacts/findings/project-delete/project-delete.md"],
+      "receiptRefs": ["artifacts/evidence/project-delete-route.txt"],
       "riskArea": "authorization"
     },
     {
@@ -261,7 +270,8 @@ document that describes the seal itself.
       { "path": "coverage.json", "sha256": "…64 hex…", "mediaType": "application/json" },
       { "path": "findings.json", "sha256": "…64 hex…", "mediaType": "application/json" },
       { "path": "report.md", "sha256": "…64 hex…", "mediaType": "text/markdown" },
-      { "path": "sarif.json", "sha256": "…64 hex…", "mediaType": "application/sarif+json" }
+      { "path": "sarif.json", "sha256": "…64 hex…", "mediaType": "application/sarif+json" },
+      { "path": "findings/project-delete/project-delete.md", "sha256": "…64 hex…", "mediaType": "text/markdown" }
     ],
     "mode": "standard",
     "warnings": [],
@@ -279,7 +289,10 @@ Notes:
   `snapshotDigest` matching `codex-security-snapshot/v1:sha256:<64 hex>`.
 - `artifacts` must contain `findings.json` exactly once. The plugin also seals
   `coverage.json`, `report.md`, `sarif.json`, an optional `threat-model.md`, and every
-  file under `artifacts/` (media type `application/octet-stream`), sorted by path.
+  file saved through `save_artifact` at its scan-relative path (for example
+  `findings/xss-login/xss-login.md` or `artifacts/evidence/request.txt`), sorted by path.
+  Saved files keep the media type given to `save_artifact`; unknown types default to
+  `text/markdown`.
 - `scan.mode` and `scan.review` are present when `coverageRef` is absent; the plugin does
   not emit `coverageRef`.
 - `remote` must not embed credentials, query strings or fragments.
@@ -309,7 +322,8 @@ Notes:
         "taxonomy": { "category": "authorization", "cwe": ["CWE-285"] },
         "locations": [{ "path": "src/projects.ts", "startLine": 88 }],
         "remediation": "Require project.ownerId === principal.userId before deleting.",
-        "provenance": { "source": "agent-review" }
+        "provenance": { "source": "agent-review" },
+        "writeup": { "reportPath": "findings/project-delete/project-delete.md" }
       }
     ],
     "reviewState": {
@@ -346,6 +360,9 @@ Draft rules:
   and a valid `disposition`; `receiptRefs` must start with `artifacts/`.
 - Draft findings must **not** include `findingId`, `occurrenceId` or `fingerprints`; the
   plugin assigns them and normalizes the rest.
+- A finding may set `writeup.reportPath` to a scan-relative `findings/<slug>/<slug>.md`
+  path. Save that file with `save_artifact` before completing the scan so it is hashed into
+  the manifest and linked from the report.
 - `complete: false` marks a checkpoint: discovery is unfinished and provisional candidates
   belong in `reviewState.deferred`. Completing a scan from an incomplete draft is allowed
   but records a warning.

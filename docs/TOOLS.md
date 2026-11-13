@@ -74,7 +74,7 @@ codex_security_compare_scans
 | 14 | `codex_security_list_candidates` | Evidence & draft | List candidates by status |
 | 15 | `codex_security_record_candidate_validations` | Evidence & draft | Record validation outcomes |
 | 16 | `codex_security_record_candidate_attack_paths` | Evidence & draft | Record attack-path analysis |
-| 17 | `codex_security_save_artifact` | Evidence & draft | Store supporting evidence under `artifacts/` |
+| 17 | `codex_security_save_artifact` | Evidence & draft | Store scan-relative evidence, writeups, patches and tests |
 | 18 | `codex_security_read_artifact` | Evidence & draft | Read a saved artifact (bounded) |
 | 19 | `codex_security_list_scans` | Findings & review | List scan summaries |
 | 20 | `codex_security_get_scan` | Findings & review | Read one scan in full |
@@ -319,7 +319,7 @@ workflow instructions.
   "draft": { "present": true, "recordedAt": "...", "complete": false, "findingsCount": 3, "surfaces": 4 },
   "candidates": { "total": 12, "byStatus": { "validated": 4, "rejected": 3 }, "validated": 4, "rejected": 3, "validations": 7, "attackPaths": 2 },
   "reviewItems": { "total": 0, "byStatus": {} },
-  "artifacts": [{ "path": "artifacts/findings/xss-login/xss-login.md", "bytes": 2048 }],
+  "artifacts": [{ "path": "findings/xss-login/xss-login.md", "bytes": 2048 }],
   "instructions": "Resume with codex_security_record_discovery_candidates ..."
 }
 ```
@@ -493,7 +493,9 @@ draft, and always before completing the scan.
 | `complete` | boolean | no | Mark the draft complete when discovery and validation are finished. |
 
 Draft findings must not include `findingId`, `occurrenceId` or `fingerprints`; the plugin
-assigns them. Full rules are in [ARTIFACTS.md](ARTIFACTS.md).
+assigns them. A draft finding may carry `writeup.reportPath`, which must match the
+scan-relative path passed to `codex_security_save_artifact` and must have the
+`findings/<slug>/<slug>.md` shape. Full rules are in [ARTIFACTS.md](ARTIFACTS.md).
 
 **Returns**
 
@@ -597,9 +599,17 @@ List recorded discovery candidates for a scan, optionally filtered by status: `d
 
 ### `codex_security_record_candidate_validations`
 
-Record validation outcomes: `status` (for example `validated`, `rejected`, `inconclusive`,
-`needs_follow_up`), summary, method, evidence and limitations. The candidate status is updated
-accordingly. Only validated candidates should become findings.
+Record validation outcomes. `status` accepts `reportable`, `deferred`, `not_applicable`
+and `suppressed`, plus the legacy aliases `validated` and `rejected`; the raw value is stored
+on the validation record and mapped onto the candidate status:
+
+| Validation status | Candidate status |
+| --- | --- |
+| `reportable`, `validated` | `validated` |
+| `suppressed`, `rejected`, `not_applicable` | `rejected` |
+| `deferred` and any other value | `validating` |
+
+Only validated candidates should become findings.
 
 **Arguments**
 
@@ -617,7 +627,7 @@ accordingly. Only validated candidates should become findings.
 ```json
 {
   "scanId": "cs_0123456789abcdef01234567",
-  "validations": [{ "candidateId": "cand_0123456789abcdef", "status": "validated", "summary": "The request URL is passed to fetch without an allow-list.", "method": "static-source-review" }]
+  "validations": [{ "candidateId": "cand_0123456789abcdef", "status": "reportable", "summary": "The request URL is passed to fetch without an allow-list.", "method": "static-source-review" }]
 }
 ```
 
@@ -648,16 +658,29 @@ preconditions and controls. Required for high/critical findings in a deep review
 
 ### `codex_security_save_artifact`
 
-Save supporting evidence for a scan: a detailed writeup, proof of concept, threat-model
-fragment or review notes. Content is stored under `<scan>/artifacts/<path>` and can be
-referenced from coverage `receiptRefs` as `artifacts/<path>`.
+Save supporting evidence for a scan: a detailed writeup, proof of concept, patch, test,
+threat model or review notes. `path` is **scan-relative** and stored verbatim under the scan
+directory; a `./` prefix is stripped. Every saved file is hashed into the sealed
+`scan-manifest.json` artifacts list. Conventional locations:
+
+| Content | Path |
+| --- | --- |
+| Finding writeup | `findings/<slug>/<slug>.md` (must equal the finding's `writeup.reportPath`) |
+| Proposed patch | `patches/<slug>.patch` |
+| Proposed test | `tests/<slug>-test.md` |
+| Fix verification note | `verify/<slug>-verification.md` |
+| Tracking summary | `tracking/summary-<yyyy-mm-dd>.md` |
+| Dependency alert note | `dependency-alerts/<package>-<advisory>.md` |
+| Triage evidence | `triage/<slug>.md` |
+| Coverage receipts and other evidence | `artifacts/<path>` (coverage `receiptRefs` must start with `artifacts/`) |
+| Copy of the threat model | `artifacts/threat-model.md` (the seal writes its own `threat-model.md` at the scan root) |
 
 **Arguments**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `scanId` | string | yes | Scan id. |
-| `path` | string | yes | Relative path under the scan artifact directory, for example `findings/xss-login/xss-login.md`. |
+| `path` | string | yes | Scan-relative POSIX path, for example `artifacts/evidence/request.txt` or `findings/xss-login/xss-login.md`. |
 | `content` | string | yes | UTF-8 text content. |
 | `mediaType` | string | no | MIME type; defaults to `text/markdown`. |
 
@@ -667,11 +690,17 @@ referenced from coverage `receiptRefs` as `artifacts/<path>`.
 {
   "ok": true,
   "scanId": "cs_...",
-  "artifact": { "path": "artifacts/findings/xss-login/xss-login.md", "bytes": 2048, "sha256": "...", "mediaType": "text/markdown", "contentBytes": 2048 }
+  "artifact": { "path": "findings/xss-login/xss-login.md", "bytes": 2048, "sha256": "...", "mediaType": "text/markdown", "contentBytes": 2048 }
 }
 ```
 
-**Errors:** paths escaping the artifact directory are rejected.
+**Errors**
+
+- `codex-security: cannot overwrite sealed artifact path: <path>` — `scan.json`,
+  `findings.json`, `coverage.json`, `scan-manifest.json`, `sarif.json`, `report.md` and
+  `threat-model.md` at the scan root are written by the plugin and cannot be replaced
+  through this tool.
+- Paths that are absolute, contain `..`, or use backslashes are rejected.
 
 **Example**
 
@@ -693,7 +722,7 @@ evidence-based review without re-reading the target.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `scanId` | string | yes | Scan id. |
-| `path` | string | yes | Artifact path; a leading `artifacts/` is accepted. |
+| `path` | string | yes | Scan-relative artifact path, as returned by `codex_security_save_artifact`. |
 | `limit` | integer | no | Maximum bytes to return, 1024–1048576. Default 262144. |
 
 **Returns** `{ "ok": true, "scanId": "...", "path": "...", "content": "...", "bytes": 2048, "truncated": false }`.

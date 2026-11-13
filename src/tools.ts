@@ -103,7 +103,7 @@ export function createSecurityTools(service: SecurityService): ToolDefinition[] 
       scanId: SCAN_ID, status: STRING,
     }, ['scanId'], (args) => service.listCandidates(args), 60000),
 
-    tool('codex_security_record_candidate_validations', 'Record validation outcomes for candidates: status (validated/rejected/inconclusive/needs_follow_up), summary, method, evidence and limitations. Candidate status is updated accordingly. Validated candidates may become findings.', {
+    tool('codex_security_record_candidate_validations', 'Record validation outcomes for candidates: status (reportable/deferred/not_applicable/suppressed; validated/rejected also accepted), summary, method, evidence and limitations. reportable maps to a validated candidate, suppressed/not_applicable/rejected close it as rejected, and deferred keeps it under validation. Only reportable candidates may become findings.', {
       scanId: SCAN_ID,
       validations: { type: 'array', items: JSON_OBJECT, description: 'Validations: {candidateId,status,summary,method?,evidence?,limitations?}.' },
     }, ['scanId'], (args) => service.recordCandidateValidations(args), 120000),

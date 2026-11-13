@@ -198,7 +198,8 @@ attack-paths.json      # candidate attack paths
 triage.json            # finding triage/remediation state
 review-items.json      # diff review items
 checkpoints/scan-draft.json
-artifacts/             # agent-saved files (writeups, evidence)
+findings/<slug>/<slug>.md   # agent-saved writeups (scan-relative)
+artifacts/                  # agent-saved coverage receipts and evidence
 ```
 
 The contract — fields, id and fingerprint rules, coverage dispositions, manifest hashes,

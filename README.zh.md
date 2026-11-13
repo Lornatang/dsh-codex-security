@@ -184,7 +184,8 @@ attack-paths.json      # 候选攻击路径
 triage.json            # 发现处置/修复状态
 review-items.json      # diff 审查项
 checkpoints/scan-draft.json
-artifacts/             # Agent 保存的文件（报告、证据）
+findings/<slug>/<slug>.md   # Agent 保存的漏洞报告（相对扫描目录）
+artifacts/                  # Agent 保存的覆盖回执与证据
 ```
 
 字段、ID 与指纹规则、覆盖处置、清单哈希、报告章节与 SARIF 映射见

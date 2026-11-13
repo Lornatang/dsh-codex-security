@@ -194,8 +194,14 @@ globbing, binary detection, language detection, severity ordering and file walki
     triage.json                               # finding triage/remediation state
     review-items.json                         # diff review items
     checkpoints/scan-draft.json               # latest recorded draft
-    artifacts/                                # agent-saved evidence files
+    findings/<slug>/<slug>.md                 # agent-saved finding writeups (scan-relative)
+    artifacts/                                # agent-saved coverage receipts and evidence
+    patches/ tests/ verify/ tracking/ triage/ dependency-alerts/   # other agent-saved notes
 ```
+
+Agent-saved files are scan-relative: `save_artifact` stores each path verbatim under the
+scan directory, and the seal hashes every one into the manifest.
+
 
 `scan.json` is the authoritative local record: lifecycle status, target and inventory,
 progress, budget (deep scans), notes, threat model, artifact list, severity counts, warnings
@@ -236,9 +242,10 @@ and policy gate. The sealed documents are derived from it plus the recorded draf
 4. Build `coverage.json` from the draft review state (inventing a default surface and a
    `scan-summary.md` artifact when no surfaces were submitted, with a warning).
 5. Render `findings.json`, `coverage.json`, `sarif.json` and `report.md`; write
-   `threat-model.md` when a threat model is present.
-6. Hash every sealed file plus previously saved artifacts and write
-   `scan-manifest.json` last.
+   `threat-model.md` when a threat model is present. These seven root files are the sealed
+   paths enforced by `save_artifact`, so agent writes cannot replace a sealed document.
+6. Hash the sealed files and every file previously saved with `save_artifact` (at its
+   scan-relative path) and write `scan-manifest.json` last.
 7. Apply the severity policy gate (completion threshold or `failOnSeverity`; `off`
    disables it) and persist the gate result on the scan.
 8. Mark the scan `completed`, store `completedAt` and the artifact list, and return paths.
@@ -273,7 +280,7 @@ reader can detect partial or tampered seals.
 | Target content | Untrusted data. Tool descriptions and skills instruct the agent never to follow instructions found in source, comments, docs or generated files; the sealed report records that limitation. |
 | Network | No network requests. Exports and state are local files; credentials are never validated against services. |
 | Secrets | Skills require redaction to a short prefix plus length with only path and line cited; the plugin does not scan for or transmit secrets. |
-| Filesystem writes | Scan state under `stateDir`; exports default to `stateDir/exports` and are confined to the workspace/state directory unless `allowExportOutsideWorkspace` is enabled. Artifact and export paths are normalized and containment-checked. |
+| Filesystem writes | Scan state under `stateDir`; exports default to `stateDir/exports` and are confined to the workspace/state directory unless `allowExportOutsideWorkspace` is enabled. Artifact and export paths are normalized and containment-checked, and the seven sealed root files cannot be overwritten through `save_artifact`. |
 | HTTP surface | Only the plugin prefix route; same-origin browser calls; no authentication layer is added because DSH already serves the local UI. JSON only except export downloads. |
 | Third-party code | The plugin executes no target code and no downloaded code. Dependencies are limited to `@deepseek-ai/schemastery` at runtime (peer: `@deepseek-ai/cordis`). |
 | Prompt injection | Model behavior is guided by skills (untrusted-data rule) and enforced as far as possible by the artifact contract: every finding needs a source location, validation notes and coverage receipts. |
