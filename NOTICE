@@ -1,0 +1,12 @@
+dsh-codex-security
+Copyright 2026 Lornatang
+
+This product includes software adapted from OpenAI codex-security
+(https://github.com/openai/codex-security), Copyright OpenAI,
+licensed under the Apache License, Version 2.0.
+
+Adapted material includes the findings, coverage, scan-manifest and scan-draft
+artifact contracts, the security review skill workflows, and the scan/report
+model described in the original project's documentation. The DeepSeek Harness
+implementation (host plugin, tools, storage, routing and client workbench) is
+an independent re-implementation against those contracts.
