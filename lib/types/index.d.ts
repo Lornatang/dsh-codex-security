@@ -6,7 +6,7 @@ export declare const name = "codex-security";
 export declare const inject: string[];
 export { Config };
 export declare const version = "0.1.0";
-export declare const packageName = "dsh-codex-security";
+export declare const packageName = "@lornatang/dsh-codex-security";
 export { SecurityService };
 export type { ConfigType };
 export declare function loadBundledSkills(packageRoot: string): SkillRegistration[];

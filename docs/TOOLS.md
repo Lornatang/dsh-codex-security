@@ -102,7 +102,7 @@ configuration, scan counters, git availability and the bundled skill names.
 ```json
 {
   "ok": true,
-  "name": "dsh-codex-security",
+  "name": "@lornatang/dsh-codex-security",
   "plugin": "codex-security",
   "version": "0.1.0",
   "stateDir": "/home/user/.dsh/profiles/web/data/codex-security",

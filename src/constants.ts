@@ -1,8 +1,8 @@
-export const PACKAGE_NAME = 'dsh-codex-security'
+export const PACKAGE_NAME = '@lornatang/dsh-codex-security'
 export const PLUGIN_NAME = 'codex-security'
 export const VERSION = '0.1.0'
 export const ROUTE_PREFIX = '/plugins/codex-security'
-export const PRODUCER = { name: 'dsh-codex-security', version: VERSION }
+export const PRODUCER = { name: '@lornatang/dsh-codex-security', version: VERSION }
 export const DEFAULT_EXCLUDES = ['.git/**','node_modules/**','dist/**','build/**','out/**','coverage/**','.next/**','.nuxt/**','vendor/**','target/**','.venv/**','__pycache__/**']
 export const SKILL_NAMES = ['security-scan','security-diff-scan','deep-security-scan','fix-finding','verify-fix','triage-finding','threat-model','track-findings','resolve-dependency-alert','vulnerability-writeup']
 export const TOOL_NAMES = [

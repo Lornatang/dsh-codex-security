@@ -90,7 +90,7 @@ Never point a test install at your working profile. Create a throwaway DSH home 
 export TEST_HOME="$(mktemp -d)"
 export DSH_HOME="$TEST_HOME"
 npm pack
-TARBALL="$(pwd)/dsh-codex-security-0.1.0.tgz"
+TARBALL="$(pwd)/lornatang-lornatang-dsh-codex-security-0.1.0.tgz"
 dsh plugin --profile codex-security-test add "$TARBALL"
 ```
 
@@ -113,7 +113,7 @@ Expected output:
 ```yaml
 # == dsh-codex-security
 - id: codex-security
-  name: dsh-codex-security
+  name: @lornatang/dsh-codex-security
   config:
     maxFiles: 5000
     maxFileBytes: 1048576
@@ -176,8 +176,8 @@ List every codex_security tool you can call, and every codex-security skill that
 ### Cleanup
 
 ```bash
-dsh plugin --profile codex-security-test remove dsh-codex-security
-rm -rf "$TEST_HOME" dsh-codex-security-0.1.0.tgz
+dsh plugin --profile codex-security-test remove @lornatang/dsh-codex-security
+rm -rf "$TEST_HOME" lornatang-dsh-codex-security-0.1.0.tgz
 unset TEST_HOME DSH_HOME
 ```
 
@@ -320,7 +320,7 @@ for (const surface of coverage.surfaces) {
 
 assert(manifest.documentType === 'codex-security.scan-manifest', 'manifest documentType');
 assert(manifest.scan.status === 'completed', 'manifest status');
-assert(manifest.scan.producer.name === 'dsh-codex-security', 'producer name');
+assert(manifest.scan.producer.name === '@lornatang/dsh-codex-security', 'producer name');
 assert(manifest.scan.producer.version === '0.1.0', 'producer version');
 assert(manifest.scan.findingsRef === 'findings.json', 'findingsRef');
 assert(manifest.scan.sealedAt >= manifest.scan.completedAt, 'seal timestamps');

@@ -7,7 +7,7 @@ and SARIF/JSON export.
 
 ## Product surface
 
-- npm package: `dsh-codex-security` (bare name, public).
+- npm package: `@lornatang/dsh-codex-security` (scoped, public).
 - DSH plugin name (export const name): `codex-security`.
 - Loader patch row id: `codex-security`.
 - Host tools are prefixed `codex_security_` (27 tools, table below).

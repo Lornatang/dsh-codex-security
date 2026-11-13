@@ -8,6 +8,8 @@ SARIF/JSON/CSV/Markdown export.
 
 Requires **DeepSeek Harness >= 0.2.2-rc.2** and **Node.js >= 22.19**.
 
+Published on npm as [`@lornatang/dsh-codex-security`](https://www.npmjs.com/package/@lornatang/dsh-codex-security).
+
 > This is an independent community project. It is not affiliated with or endorsed by
 > OpenAI or DeepSeek. The artifact contracts, skill workflows and scan/report model are
 > adapted from OpenAI codex-security under the Apache License 2.0 — see [NOTICE](NOTICE).
@@ -61,7 +63,7 @@ or test the repository it reviews.
 Install the package into the DSH profile you use:
 
 ```bash
-dsh plugin --profile <profile> add dsh-codex-security
+dsh plugin --profile <profile> add @lornatang/dsh-codex-security
 ```
 
 Replace `<profile>` with your profile name (for example `desktop` or `web`). Then restart
@@ -74,7 +76,7 @@ command. The CLI command above always works.
 Uninstall with:
 
 ```bash
-dsh plugin --profile <profile> remove dsh-codex-security
+dsh plugin --profile <profile> remove @lornatang/dsh-codex-security
 ```
 
 ## Quick start
@@ -162,7 +164,7 @@ Configure the plugin in your DSH profile patch
 
 ```yaml
 - id: codex-security
-  name: 'dsh-codex-security'
+  name: '@lornatang/dsh-codex-security'
   config:
     defaultMode: standard
     failOnSeverity: high

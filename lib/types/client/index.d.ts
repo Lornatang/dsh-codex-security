@@ -1,5 +1,5 @@
 import * as React from 'react';
-export declare const name = "dsh-codex-security";
+export declare const name = "@lornatang/dsh-codex-security";
 export declare const inject: string[];
 interface SlotsApi {
     inject(name: string, callback: () => () => void): void;

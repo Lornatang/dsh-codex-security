@@ -245,7 +245,7 @@ document that describes the seal itself.
   "schemaVersion": "1.0",
   "scan": {
     "id": "cs_0123456789abcdef01234567",
-    "producer": { "name": "dsh-codex-security", "version": "0.1.0" },
+    "producer": { "name": "@lornatang/dsh-codex-security", "version": "0.1.0" },
     "status": "completed",
     "startedAt": "2026-01-01T11:45:00.000Z",
     "completedAt": "2026-01-01T12:00:00.000Z",

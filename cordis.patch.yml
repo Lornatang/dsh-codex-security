@@ -1,6 +1,6 @@
 - insert:
     - id: codex-security
-      name: 'dsh-codex-security'
+      name: '@lornatang/dsh-codex-security'
       config:
         maxFiles: 5000
         maxFileBytes: 1048576

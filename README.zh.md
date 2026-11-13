@@ -7,6 +7,8 @@
 
 需要 **DeepSeek Harness >= 0.2.2-rc.2** 与 **Node.js >= 22.19**。
 
+已发布到 npm：[`@lornatang/dsh-codex-security`](https://www.npmjs.com/package/@lornatang/dsh-codex-security)。
+
 > 这是一个独立的社区项目，与 OpenAI、DeepSeek 均无隶属或背书关系。产物契约、技能流程与
 > 扫描/报告模型改编自 Apache License 2.0 许可的 OpenAI codex-security，详见 [NOTICE](NOTICE)。
 
@@ -50,7 +52,7 @@ DSH 插件可以同时提供宿主工具、技能、HTTP 路由与客户端界�
 把包安装到你使用的 DSH profile：
 
 ```bash
-dsh plugin --profile <profile> add dsh-codex-security
+dsh plugin --profile <profile> add @lornatang/dsh-codex-security
 ```
 
 把 `<profile>` 替换为你的 profile 名称（例如 `desktop` 或 `web`），然后重启 DSH。
@@ -62,7 +64,7 @@ dsh plugin --profile <profile> add dsh-codex-security
 卸载：
 
 ```bash
-dsh plugin --profile <profile> remove dsh-codex-security
+dsh plugin --profile <profile> remove @lornatang/dsh-codex-security
 ```
 
 ## 快速开始
@@ -148,7 +150,7 @@ Agent 也可能主动提出审查，例如“帮我审查未提交改动中的�
 
 ```yaml
 - id: codex-security
-  name: 'dsh-codex-security'
+  name: '@lornatang/dsh-codex-security'
   config:
     defaultMode: standard
     failOnSeverity: high

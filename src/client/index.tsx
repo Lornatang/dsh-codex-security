@@ -6,7 +6,7 @@
  */
 import * as React from 'react'
 
-export const name = 'dsh-codex-security'
+export const name = '@lornatang/dsh-codex-security'
 export const inject = ['slots']
 
 const API_BASE = '/plugins/codex-security'
