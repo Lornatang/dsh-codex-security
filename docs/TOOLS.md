@@ -279,7 +279,9 @@ Attach a remediation plan to a finding and optionally advance its triage status 
 
 Export sealed findings for a scan as sarif, json, csv or markdown. Writes to <stateDir>/exports/ by default (or an in-workspace outputPath) and returns the absolute path, byte count and policy gate. Existing files are never replaced: an explicit destination must be new, while a default destination receives a numbered suffix on collision. Version-control metadata and scan storage are excluded.
 
-On filesystems without hard-link support, a new destination is written directly and may be incomplete if the write fails. Do not allow untrusted local processes to rename output directories while exporting; path checks are not a cross-process filesystem sandbox.
+Export pins the approved directory objects across creation, publication and cleanup. Windows prevents those directories from being renamed during the operation; on POSIX a moved directory is detected at checkpoints and the export fails. POSIX directory descriptors continue to refer to the same objects after a move, so a hostile process with permission to move them between checks cannot be stopped by this mechanism. If a move is detected after publication, a file may remain in the moved directory. Where descriptor-based publication is unavailable, a new destination is written directly and may be incomplete if the write fails. Restrict write access to export directories: on POSIX another process with sufficient access can alter a staged file in place.
+
+File export requires the optional `koffi` native package and supported filesystem primitives; it fails closed when these are unavailable. Scanning and in-memory export remain available without that package.
 
 | Argument | Type | Required | Description |
 | --- | --- | --- | --- |

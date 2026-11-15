@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import Ajv2020 from 'ajv/dist/2020.js'
@@ -25,7 +25,7 @@ const finding = {
 }
 
 async function fixture(git = false) {
-  const temp = await mkdtemp(join(tmpdir(), 'dcs-regression-'))
+  const temp = await realpath(await mkdtemp(join(tmpdir(), 'dcs-regression-')))
   const target = join(temp, 'target')
   await mkdir(join(target, 'src'), { recursive: true })
   await mkdir(join(target, 'other'), { recursive: true })
@@ -195,6 +195,24 @@ test('large sealed exports are returned in full', async () => {
     }
     await writeFile(completed.reportPath, padding)
     assert.equal((await f.service.exportContent(scan.scanId, 'markdown')).content, padding)
+  } finally { await f.cleanup() }
+})
+
+test('outside exports remain exclusive and never enter scan or version-control storage', async () => {
+  const f = await fixture()
+  try {
+    const service = new SecurityService({}, { config: { stateDir: join(f.temp, 'state'), allowExportOutsideWorkspace: true } })
+    const scan = await service.startScan({ targetPath: f.target }, 'standard')
+    await service.recordScanDraft({ scanId: scan.scanId, ...draft() })
+    const completed = await service.completeScan({ scanId: scan.scanId })
+    const output = join(f.temp, 'outside', 'nested', 'result.json')
+    const exported = await service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: output })
+    assert.equal(exported.path, output)
+    const content = await readFile(output, 'utf8')
+    assert.doesNotThrow(() => JSON.parse(content))
+    await assert.rejects(service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: output }), /already exists/i)
+    await assert.rejects(service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: join(dirname(completed.reportPath), 'new.json') }), /scan storage/i)
+    await assert.rejects(service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: join(f.temp, '.git', 'hooks', 'result.json') }), /version.control/i)
   } finally { await f.cleanup() }
 })
 

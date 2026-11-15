@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'ci/**']
     tags: ['v*']
   pull_request:
     branches: [main]
@@ -12,12 +12,17 @@ permissions:
 
 jobs:
   test:
-    name: Node ${{ matrix.node }}
-    runs-on: ubuntu-24.04
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        node: ['22.19.0', '24']
+        include:
+          - { os: ubuntu-24.04, node: '22.19.0' }
+          - { os: ubuntu-24.04, node: '24' }
+          - { os: windows-2025, node: '24' }
+          - { os: macos-15, node: '24' }
+          - { os: macos-15-intel, node: '24' }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

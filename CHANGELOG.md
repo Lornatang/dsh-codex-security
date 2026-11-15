@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4] - 2026-11-15
+
+### Fixed
+
+- Pin export directory identities across parent creation, exclusive publication and cleanup, detecting directory moves while preserving existing export boundaries.
+- Add cross-process race tests and Linux, macOS and Windows CI coverage. This release is available on GitHub only; no npm version is published.
+
 ## [0.1.3] - 2026-11-15
 
 ### Fixed
