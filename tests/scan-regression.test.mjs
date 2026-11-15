@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { access, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import Ajv2020 from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { SecurityService } from '../lib/service.js'
@@ -228,6 +229,46 @@ test('exports reject a separate Git metadata directory inside the workspace', as
     await f.service.completeScan({ scanId: scan.scanId })
     await assert.rejects(f.service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: join(metadata, 'refs', 'heads', 'export') }), /version.control/i)
   } finally { await f.cleanup() }
+})
+
+test('a directory snapshot that later becomes a Git repository protects its metadata', async () => {
+  const f = await fixture()
+  try {
+    const scan = await f.service.startScan({ targetPath: f.target }, 'standard')
+    assert.equal(scan.scan.target.kind, 'directory_snapshot')
+    await f.service.recordScanDraft({ scanId: scan.scanId, ...draft() })
+    await f.service.completeScan({ scanId: scan.scanId })
+    const metadata = join(f.target, 'git-store')
+    execFileSync('git', ['init', '-q', '--separate-git-dir', metadata, f.target], { stdio: 'ignore' })
+    await assert.rejects(f.service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: join(metadata, 'result.json') }), /version.control/i)
+    const safe = join(f.target, 'result.json')
+    const exported = await f.service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: safe })
+    assert.equal(exported.path, safe)
+  } finally { await f.cleanup() }
+})
+
+test('a directory snapshot with broken Git metadata fails closed', async () => {
+  const f = await fixture()
+  try {
+    const scan = await f.service.startScan({ targetPath: f.target }, 'standard')
+    await f.service.recordScanDraft({ scanId: scan.scanId, ...draft() })
+    await f.service.completeScan({ scanId: scan.scanId })
+    await writeFile(join(f.target, '.git'), 'gitdir: missing-metadata\n')
+    const output = join(f.target, 'result.json')
+    await assert.rejects(f.service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: output }), /cannot resolve target version-control metadata/)
+    assert.equal(await access(output).then(() => true, () => false), false)
+  } finally { await f.cleanup() }
+})
+
+test('a plain directory snapshot can be exported without Git installed', async () => {
+  const temp = await realpath(await mkdtemp(join(tmpdir(), 'dcs-no-git-')))
+  try {
+    const helper = fileURLToPath(new URL('./fixtures/export-without-git.mjs', import.meta.url))
+    const output = execFileSync(process.execPath, [helper, temp], { encoding: 'utf8', env: { ...process.env, PATH: '', Path: '' } })
+    const result = JSON.parse(output)
+    assert.equal(result.kind, 'directory_snapshot')
+    assert.doesNotThrow(() => JSON.parse(result.content))
+  } finally { await rm(temp, { recursive: true, force: true }) }
 })
 
 test('concurrent candidate updates are retained and a missing index is rebuilt on list', async () => {

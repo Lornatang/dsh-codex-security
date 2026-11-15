@@ -1,4 +1,4 @@
-import { readFile, rm } from 'node:fs/promises'
+import { lstat, readFile, rm } from 'node:fs/promises'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { DEFAULT_CONFIG } from './config.js'
 import type { Config } from './config.js'
@@ -22,6 +22,20 @@ import { createExportValidator, writeSecureExport } from './secure-export.js'
 
 export const FORMATS = ['sarif', 'json', 'csv', 'markdown'] as const
 export type ExportFormat = (typeof FORMATS)[number]
+
+async function possibleGitMetadata(root: string): Promise<boolean> {
+  if (process.env['GIT_DIR'] !== undefined || process.env['GIT_COMMON_DIR'] !== undefined) return true
+  const exists = async (path: string): Promise<boolean> => {
+    try { await lstat(path); return true } catch (error) {
+      if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return false
+      throw new Error('codex-security: cannot inspect target version-control metadata', { cause: error })
+    }
+  }
+  for (let current = resolvePath(root); ; current = dirname(current)) {
+    if (await exists(join(current, '.git')) || (await exists(join(current, 'HEAD')) && await exists(join(current, 'objects')))) return true
+    if (dirname(current) === current) return false
+  }
+}
 
 interface StoredDraft {
   scanId: string
@@ -952,15 +966,22 @@ export class SecurityService {
       : join(this.store.stateDir, 'exports', scanId + '.' + extension)
     const allowedRoots = await Promise.all([this.store.stateDir, process.cwd(), record.target.rootPath].map(canonicalProspectivePath))
     const scanRoot = join(this.store.stateDir, 'repositories')
-    const gitDirs: string[] = []
-    if (record.target.kind !== 'directory_snapshot') {
-      for (const flag of ['--git-dir', '--git-common-dir']) {
-        const directory = await gitString(record.target.rootPath, ['rev-parse', '--path-format=absolute', flag])
-        if (!directory) throw new Error('codex-security: cannot resolve target version-control metadata')
-        gitDirs.push(resolvePath(record.target.rootPath, directory))
+    let requireGit = record.target.kind !== 'directory_snapshot'
+    const resolveGitDirs = async (): Promise<string[]> => {
+      if (!requireGit && !await possibleGitMetadata(record.target.rootPath)) return []
+      const directories = await Promise.all(['--git-dir', '--git-common-dir'].map((flag) =>
+        gitString(record.target.rootPath, ['rev-parse', '--path-format=absolute', flag])))
+      if (directories.every((directory) => !!directory)) {
+        requireGit = true
+        return directories.map((directory) => resolvePath(record.target.rootPath, directory!))
       }
+      if (requireGit || directories.some((directory) => !!directory) || await possibleGitMetadata(record.target.rootPath)) {
+        throw new Error('codex-security: cannot resolve target version-control metadata')
+      }
+      return []
     }
-    const checkPath = await createExportValidator({ requestedOutput, allowedRoots, scanRoot, gitDirs, allowOutside: this.config.allowExportOutsideWorkspace })
+    const gitDirs = await resolveGitDirs()
+    const checkPath = await createExportValidator({ requestedOutput, allowedRoots, scanRoot, gitDirs, resolveGitDirs, allowOutside: this.config.allowExportOutsideWorkspace })
     const output = await writeSecureExport({ requestedOutput, requested: !!requested, scanId, extension, content: exported.content, validate: checkPath })
     return { ok: true, scanId, format, path: output, bytes: Buffer.byteLength(exported.content, 'utf8'), findingsCount: exported.count, policy: exported.policy ?? null }
   }

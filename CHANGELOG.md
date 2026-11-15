@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.5] - 2026-11-15
+
+### Fixed
+
+- Revalidate scan storage and Git metadata at export checkpoints, including when a directory snapshot becomes a Git repository.
+- Reject aliases inside protected storage and logical output paths that escape through links.
+- Cover POSIX moves, protected-root changes and Git metadata redirection with cross-platform regression tests.
+
 ## [0.1.4] - 2026-11-15
 
 ### Fixed

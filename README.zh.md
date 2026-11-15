@@ -34,7 +34,7 @@ dsh plugin --profile <name> add @lornatang/dsh-codex-security
 dsh plugin --profile <name> remove @lornatang/dsh-codex-security
 ```
 
-安装仅发布到 GitHub 的 0.1.4 版本，请运行 `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-codex-security/releases/download/v0.1.4/lornatang-dsh-codex-security-0.1.4.tgz`。npm 仓库中的版本可能较旧。
+安装仅发布到 GitHub 的 0.1.5 版本，请运行 `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-codex-security/releases/download/v0.1.5/lornatang-dsh-codex-security-0.1.5.tgz`。npm 仓库中的版本可能较旧。
 
 `add` 命令把这一层组合进 profile：profile 的 `cordis.patch.yml` 中新增一条 insert 条目，row id 为 `codex-security`，其 `config` 从本包默认值 `maxFiles: 5000`、`maxFileBytes: 1048576`、`defaultMode: standard` 开始；其余字段取 `src/config.ts` 中的默认值。包清单把 `dsh.bundle.patch` 指向该文档。`remove` 命令删除该条目，已经写入 profile 数据目录的扫描保持不变。
 

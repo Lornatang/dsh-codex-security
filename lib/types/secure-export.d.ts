@@ -15,6 +15,7 @@ export declare function createExportValidator(options: {
     scanRoot: string;
     gitDirs: readonly string[];
     allowOutside: boolean;
+    resolveGitDirs?(): Promise<readonly string[]>;
 }): Promise<(output: string) => Promise<void>>;
 /** Pin the output directory object before applying policy or mutating the tree. */
 export declare function writeSecureExport(options: SecureExportOptions): Promise<string>;

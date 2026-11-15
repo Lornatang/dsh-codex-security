@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { closeSync, constants, fstatSync, lstatSync, openSync, writeFile as writeFileCallback } from 'node:fs'
-import { link, mkdir, stat } from 'node:fs/promises'
+import { link, lstat, mkdir, readdir, stat } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, toNamespacedPath } from 'node:path'
 import { getSystemErrorName, promisify } from 'node:util'
@@ -42,9 +42,33 @@ async function captureProtected(path: string): Promise<ProtectedDirectory> {
   }
 }
 
+/** Reject links inside protected trees, which can alias external output paths. */
+async function assertProtectedTreeHasNoLinks(root: string, existed: boolean, label: 'scan storage' | 'version-control metadata'): Promise<void> {
+  const pending = [root]
+  while (pending.length) {
+    const directory = pending.pop()!
+    let entries, before, after
+    try {
+      before = await lstat(directory, { bigint: true })
+      if (!before.isDirectory() || before.isSymbolicLink()) throw new Error('protected directory changed or is a link')
+      entries = await readdir(directory, { withFileTypes: true })
+      after = await lstat(directory, { bigint: true })
+      if (!after.isDirectory() || before.dev !== after.dev || before.ino !== after.ino) throw new Error('protected directory changed')
+    } catch (error) {
+      if (!existed && directory === root && (error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw new Error(`codex-security: cannot inspect ${label}`, { cause: error })
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) throw new Error(`codex-security: refusing to export while ${label} contains links`)
+      if (entry.isDirectory()) pending.push(join(directory, entry.name))
+    }
+  }
+}
+
 /** Re-resolve protected locations and retain their original directory identities. */
 export async function createExportValidator(options: {
   requestedOutput: string; allowedRoots: readonly string[]; scanRoot: string; gitDirs: readonly string[]; allowOutside: boolean
+  resolveGitDirs?(): Promise<readonly string[]>
 }): Promise<(output: string) => Promise<void>> {
   const scan = await captureProtected(options.scanRoot)
   const git = await Promise.all(options.gitDirs.map(captureProtected))
@@ -53,9 +77,16 @@ export async function createExportValidator(options: {
       throw new Error('codex-security: refusing to export into version-control metadata')
     }
     const scanPaths = [scan.canonical, await canonicalProspectivePath(scan.path)]
-    const gitPaths = [...git.map((item) => item.canonical), ...await Promise.all(git.map((item) => canonicalProspectivePath(item.path)))]
-    if (scanPaths.some((path) => isWithin(path, output))) throw new Error('codex-security: refusing to export into scan storage')
-    if (gitPaths.some((path) => isWithin(path, output))) throw new Error('codex-security: refusing to export into version-control metadata')
+    const currentGitDirs = await options.resolveGitDirs?.() ?? []
+    const gitPaths = [...git.map((item) => item.canonical), ...await Promise.all([...git.map((item) => item.path), ...currentGitDirs].map(canonicalProspectivePath))]
+    if ([scan.path, ...scanPaths].some((path) => isWithin(path, options.requestedOutput)) || scanPaths.some((path) => isWithin(path, output))) {
+      throw new Error('codex-security: refusing to export into scan storage')
+    }
+    if ([...git.map((item) => item.path), ...currentGitDirs, ...gitPaths].some((path) => isWithin(path, options.requestedOutput)) || gitPaths.some((path) => isWithin(path, output))) {
+      throw new Error('codex-security: refusing to export into version-control metadata')
+    }
+    await assertProtectedTreeHasNoLinks(scanPaths[1]!, !!scan.identity, 'scan storage')
+    for (const path of new Set(gitPaths)) await assertProtectedTreeHasNoLinks(path, false, 'version-control metadata')
     const identities = [scan, ...git].filter((item) => item.identity)
     for (let current = dirname(output); identities.length; current = dirname(current)) {
       try {
@@ -140,18 +171,26 @@ function openatDirectory(native: NativeFunctions, parent: number, name: string):
   return fd
 }
 
-async function writePosixFile(native: NativeFunctions, directories: PosixDirectory[], name: string, content: string, hooks: SecureExportOptions['onPhase']): Promise<void> {
+async function validatePosix(directories: readonly PosixDirectory[], output: string, validate: SecureExportOptions['validate']): Promise<void> {
+  assertDirectoriesCurrent(directories)
+  await validate(output)
+  assertDirectoriesCurrent(directories)
+}
+
+async function writePosixFile(native: NativeFunctions, directories: PosixDirectory[], name: string, options: SecureExportOptions): Promise<void> {
   const parent = directories[directories.length - 1]!
   const temporary = `.${process.pid}.${randomBytes(12).toString('hex')}.tmp`
-  assertDirectoriesCurrent(directories)
+  const output = join(parent.path, name)
+  const check = () => validatePosix(directories, output, options.validate)
+  await check()
   const fd = native.openat(parent.fd, temporary, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
   if (fd < 0) throw nativeError('creating temporary export')
   try {
     if (native.fcntl(fd, 2, 1) < 0) throw nativeError('securing export descriptor')
-    await writeFile(fd, content, 'utf8')
-    assertDirectoriesCurrent(directories)
-    await hooks?.('before-publish')
-    assertDirectoriesCurrent(directories)
+    await writeFile(fd, options.content, 'utf8')
+    await check()
+    await options.onPhase?.('before-publish')
+    await check()
     // Publish from the open file, never from the replaceable temporary name.
     // If the platform or filesystem cannot do that, create the final name
     // exclusively and write it directly instead.
@@ -166,19 +205,19 @@ async function writePosixFile(native: NativeFunctions, directories: PosixDirecto
       if (destination < 0) throw nativeError('creating export')
       try {
         if (native.fcntl(destination, 2, 1) < 0) throw nativeError('securing export descriptor')
-        await writeFile(destination, content, 'utf8')
+        await writeFile(destination, options.content, 'utf8')
       } finally { closeSync(destination) }
     }
-    assertDirectoriesCurrent(directories)
+    await check()
   } finally {
     closeSync(fd)
-    await hooks?.('before-cleanup')
+    await options.onPhase?.('before-cleanup')
     if (native.unlinkat(parent.fd, temporary, 0) < 0) {
       const error = nativeError('removing temporary export')
       if (error.code !== 'ENOENT') throw error
     }
   }
-  assertDirectoriesCurrent(directories)
+  await check()
 }
 
 async function writePosix(options: SecureExportOptions, output: string): Promise<string> {
@@ -199,27 +238,23 @@ async function writePosix(options: SecureExportOptions, output: string): Promise
       }
     }
     await options.onPhase?.('pinned')
-    assertDirectoriesCurrent(directories)
-    await options.validate(output)
-    assertDirectoriesCurrent(directories)
+    await validatePosix(directories, output, options.validate)
     for (let index = firstMissing; index < parts.length; index++) {
       const parent = directories[directories.length - 1]!
       const name = parts[index]!
       await options.onPhase?.('before-mkdir')
-      assertDirectoriesCurrent(directories)
+      await validatePosix(directories, output, options.validate)
       if (native.mkdirat(parent.fd, name, 0o700) < 0) {
         const error = nativeError('creating export directory')
         if (error.code !== 'EEXIST') throw error
       }
       addPosixDirectory(directories, openatDirectory(native, parent.fd, name), join(parent.path, name))
-      assertDirectoriesCurrent(directories)
-      await options.validate(output)
-      assertDirectoriesCurrent(directories)
+      await validatePosix(directories, output, options.validate)
     }
     for (let suffix = 0; ; suffix++) {
       const filename = suffix ? `${options.scanId}-${suffix}.${options.extension}` : basename(output)
       try {
-        await writePosixFile(native, directories, filename, options.content, options.onPhase)
+        await writePosixFile(native, directories, filename, options)
         return join(targetDir, filename)
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
@@ -270,16 +305,19 @@ async function writeWindowsBytes(native: WindowsFunctions, handle: bigint, data:
   }
 }
 
-async function writeWindowsFile(native: WindowsFunctions, path: string, content: string, hooks: SecureExportOptions['onPhase']): Promise<void> {
+async function writeWindowsFile(native: WindowsFunctions, path: string, options: SecureExportOptions): Promise<void> {
   const temporary = join(dirname(path), `.${process.pid}.${randomBytes(12).toString('hex')}.tmp`)
+  await options.validate(path)
   // DELETE_ON_CLOSE removes our own file by handle; the sharing mode prevents
   // a concurrent process from renaming, replacing or modifying the stage.
   const stage = native.create(toNamespacedPath(temporary), 0xc0010000, 1, null, 1, 0x04000080, null)
   if (!stage || invalidHandle(stage)) throw new Error(`codex-security: cannot create temporary export (${native.lastError()})`)
   try {
-    const data = Buffer.from(content, 'utf8')
+    const data = Buffer.from(options.content, 'utf8')
     await writeWindowsBytes(native, stage, data)
-    await hooks?.('before-publish')
+    await options.validate(path)
+    await options.onPhase?.('before-publish')
+    await options.validate(path)
     try { await link(temporary, path) } catch (error) {
       if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
       const destination = native.create(toNamespacedPath(path), 0x40000000, 1, null, 1, 0x80, null)
@@ -291,8 +329,10 @@ async function writeWindowsFile(native: WindowsFunctions, path: string, content:
       }
       try { await writeWindowsBytes(native, destination, data) } finally { native.close(destination) }
     }
-    await hooks?.('before-cleanup')
+    await options.validate(path)
+    await options.onPhase?.('before-cleanup')
   } finally { native.close(stage) }
+  await options.validate(path)
 }
 
 async function acquireWindowsExportLock(native: WindowsFunctions): Promise<() => void> {
@@ -373,6 +413,7 @@ async function writeWindows(options: SecureExportOptions, output: string): Promi
     for (let index = firstMissing; index < components.length; index++) {
       const path = resolve(guards[guards.length - 1]!.path, components[index]!)
       await options.onPhase?.('before-mkdir')
+      await options.validate(output)
       try { await mkdir(path, { mode: 0o700 }) } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
       }
@@ -396,7 +437,7 @@ async function writeWindows(options: SecureExportOptions, output: string): Promi
       const filename = suffix ? `${options.scanId}-${suffix}.${options.extension}` : basename(output)
       const path = join(targetDir, filename)
       try {
-        await writeWindowsFile(native, path, options.content, options.onPhase)
+        await writeWindowsFile(native, path, options)
         return path
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error

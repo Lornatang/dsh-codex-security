@@ -1,6 +1,6 @@
 export declare const PACKAGE_NAME = "@lornatang/dsh-codex-security";
 export declare const PLUGIN_NAME = "codex-security";
-export declare const VERSION = "0.1.4";
+export declare const VERSION = "0.1.5";
 export declare const ROUTE_PREFIX = "/plugins/codex-security";
 export declare const PRODUCER: {
     name: string;
