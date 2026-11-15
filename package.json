@@ -1,6 +1,6 @@
 {
   "name": "@lornatang/dsh-codex-security",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Agent-native security review workbench for DeepSeek Harness, modeled on OpenAI codex-security: sealed scans, findings contract, deep-scan orchestration and SARIF/JSON export.",
   "type": "module",
   "license": "Apache-2.0",
@@ -32,6 +32,7 @@
       "types": "./lib/types/client/index.d.ts",
       "default": "./lib/client.js"
     },
+    "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
@@ -43,6 +44,7 @@
     "docs",
     "examples",
     "README.md",
+    "README.zh.md",
     "CHANGELOG.md",
     "LICENSE",
     "NOTICE"

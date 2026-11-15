@@ -218,6 +218,6 @@ test('published documentation tracks the registered tool surface', async () => {
   assert.equal(pkg.version, VERSION)
   assert.ok(pkg.files.includes('docs'))
   assert.ok(pkg.files.includes('examples'))
-  assert.equal(pkg.files.includes('README.zh.md'), false)
-  await assert.rejects(access(new URL('README.zh.md', root)))
+  assert.ok(pkg.files.includes('README.zh.md'))
+  await access(new URL('README.zh.md', root))
 })

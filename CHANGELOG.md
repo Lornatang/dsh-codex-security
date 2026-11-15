@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.2] - 2026-11-15
 
 ### Fixed
 
@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name; install with `dsh plugin --profile <profile> add @lornatang/dsh-codex-security`.
 - Ship the English documentation and examples with the package; align the architecture,
   tool reference and skill workflows with the implementation.
+- Rewrite the README to the package-bundle documentation convention and add a Chinese
+  translation; the package now ships `README.md` and `README.zh.md`.
+- Publish `cordis.patch.yml` through the package `exports` map.
 
 ## [0.1.0] - 2026-11-13
 
