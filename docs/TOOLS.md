@@ -277,7 +277,9 @@ Attach a remediation plan to a finding and optionally advance its triage status 
 
 ### `codex_security_export_findings`
 
-Export sealed findings for a scan as sarif, json, csv or markdown. Writes to <stateDir>/exports/ by default (or an in-workspace outputPath) and returns the absolute path, byte count and policy gate.
+Export sealed findings for a scan as sarif, json, csv or markdown. Writes to <stateDir>/exports/ by default (or an in-workspace outputPath) and returns the absolute path, byte count and policy gate. Existing files are never replaced: an explicit destination must be new, while a default destination receives a numbered suffix on collision. Version-control metadata and scan storage are excluded.
+
+On filesystems without hard-link support, a new destination is written directly and may be incomplete if the write fails. Do not allow untrusted local processes to rename output directories while exporting; path checks are not a cross-process filesystem sandbox.
 
 | Argument | Type | Required | Description |
 | --- | --- | --- | --- |

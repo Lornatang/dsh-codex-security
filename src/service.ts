@@ -17,7 +17,7 @@ import { FINDING_STATUSES, SEVERITIES } from './types.js'
 import { ScanStore, defaultStateDir } from './store.js'
 import { readEvidenceLine, resolveTarget } from './target.js'
 import { assertArtifactContract } from './schema.js'
-import { ensureDir, isWithin, joinWithin, newId, nowIso, readJson, readText, sanitizeRelative, sha256, truncate, writeFileAtomic, writeJsonAtomic } from './util.js'
+import { canonicalProspectivePath, ensureDir, isWithin, joinWithin, newId, nowIso, readFullText, readJson, sanitizeRelative, sha256, truncate, writeFileAtomic, writeFileExclusive, writeJsonAtomic } from './util.js'
 
 export const FORMATS = ['sarif', 'json', 'csv', 'markdown'] as const
 export type ExportFormat = (typeof FORMATS)[number]
@@ -923,17 +923,17 @@ export class SecurityService {
     const findings = await this.store.readFindings(scanId)
     const policy = policyGate(findings, thresholdOf(this.config.failOnSeverity))
     if (format === 'json') {
-      const content = await readText(join(dir, 'findings.json')) ?? JSON.stringify(buildFindingsDocument(scanId, findings), null, 2)
+      const content = await readFullText(join(dir, 'findings.json')) ?? JSON.stringify(buildFindingsDocument(scanId, findings), null, 2)
       return { content, mediaType: 'application/json', filename: scanId + '.json', count: findings.length, policy }
     }
     if (format === 'sarif') {
-      const content = await readText(join(dir, 'sarif.json')) ?? JSON.stringify(toSarif(record, findings), null, 2)
+      const content = await readFullText(join(dir, 'sarif.json')) ?? JSON.stringify(toSarif(record, findings), null, 2)
       return { content, mediaType: 'application/sarif+json', filename: scanId + '.sarif.json', count: findings.length, policy }
     }
     if (format === 'csv') {
       return { content: toCsv(findings), mediaType: 'text/csv', filename: scanId + '.csv', count: findings.length, policy }
     }
-    const stored = await readText(join(dir, 'report.md'))
+    const stored = await readFullText(join(dir, 'report.md'))
     if (stored) return { content: stored, mediaType: 'text/markdown', filename: scanId + '.md', count: findings.length, policy }
     const coverage = await readJson<CoverageDocument>(join(dir, 'coverage.json')) ?? buildCoverage(record, { surfaces: [] })
     return { content: renderReport(record, findings, coverage, { sealedAt: record.completedAt ?? nowIso() }), mediaType: 'text/markdown', filename: scanId + '.md', count: findings.length, policy }
@@ -946,16 +946,42 @@ export class SecurityService {
     const exported = await this.exportContent(scanId, format)
     const extension = format === 'markdown' ? 'md' : format === 'sarif' ? 'sarif.json' : format
     const requested = str(args['outputPath'])
-    const output = requested
+    const requestedOutput = requested
       ? resolvePath(requested)
       : join(this.store.stateDir, 'exports', scanId + '.' + extension)
-    if (isWithin(join(this.store.stateDir, 'repositories'), output)) throw new Error('codex-security: refusing to export into scan storage')
-    const allowedRoots = [this.store.stateDir, process.cwd(), record.target.rootPath]
-    if (!this.config.allowExportOutsideWorkspace && !allowedRoots.some((root) => isWithin(root, output))) {
-      throw new Error('codex-security: refusing to write outside the workspace/state dir; pass an in-workspace outputPath or enable allowExportOutsideWorkspace')
+    const allowedRoots = await Promise.all([this.store.stateDir, process.cwd(), record.target.rootPath].map(canonicalProspectivePath))
+    const scanRoot = await canonicalProspectivePath(join(this.store.stateDir, 'repositories'))
+    const gitDirs: string[] = []
+    if (record.target.kind !== 'directory_snapshot') {
+      for (const flag of ['--git-dir', '--git-common-dir']) {
+        const directory = await gitString(record.target.rootPath, ['rev-parse', '--path-format=absolute', flag])
+        if (!directory) throw new Error('codex-security: cannot resolve target version-control metadata')
+        gitDirs.push(await canonicalProspectivePath(resolvePath(record.target.rootPath, directory)))
+      }
     }
-    await ensureDir(dirname(output))
-    await writeFileAtomic(output, exported.content)
+    const checkPath = async (): Promise<string> => {
+      const output = await canonicalProspectivePath(requestedOutput)
+      if (/(?:^|[\\/])\.(?:git|hg|svn)(?:[\\/]|$)/i.test(requestedOutput) || /(?:^|[\\/])\.(?:git|hg|svn)(?:[\\/]|$)/i.test(output)) {
+        throw new Error('codex-security: refusing to export into version-control metadata')
+      }
+      if (isWithin(scanRoot, output)) throw new Error('codex-security: refusing to export into scan storage')
+      if (gitDirs.some((directory) => isWithin(directory, output))) throw new Error('codex-security: refusing to export into version-control metadata')
+      if (!this.config.allowExportOutsideWorkspace && !allowedRoots.some((root) => isWithin(root, output))) {
+        throw new Error('codex-security: refusing to write outside the workspace/state dir; pass an in-workspace outputPath or enable allowExportOutsideWorkspace')
+      }
+      return output
+    }
+    const checked = await checkPath()
+    await ensureDir(dirname(checked))
+    const baseOutput = await checkPath()
+    let output = baseOutput
+    for (let suffix = 0; ; suffix++) {
+      if (suffix) output = join(dirname(baseOutput), scanId + '-' + suffix + '.' + extension)
+      try { await writeFileExclusive(output, exported.content); break } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        if (requested) throw new Error('codex-security: export destination already exists: ' + output, { cause: error })
+      }
+    }
     return { ok: true, scanId, format, path: output, bytes: Buffer.byteLength(exported.content, 'utf8'), findingsCount: exported.count, policy: exported.policy ?? null }
   }
 

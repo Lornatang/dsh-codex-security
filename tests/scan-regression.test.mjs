@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import Ajv2020 from 'ajv/dist/2020.js'
@@ -144,6 +144,71 @@ test('sealed evidence remains unchanged and output documents satisfy their schem
       const validate = ajv.compile(schema)
       assert.equal(validate(JSON.parse(await readFile(file, 'utf8'))), true, JSON.stringify(validate.errors))
     }
+  } finally { await f.cleanup() }
+})
+
+test('exports never replace existing files and enforce canonical output boundaries', async () => {
+  const f = await fixture()
+  try {
+    const scan = await f.service.startScan({ targetPath: f.target }, 'standard')
+    await f.service.recordScanDraft({ scanId: scan.scanId, ...draft() })
+    const completed = await f.service.completeScan({ scanId: scan.scanId })
+    const existing = join(f.target, 'src', 'app.js')
+    await assert.rejects(f.service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: existing }), /exist/i)
+    assert.equal(await readFile(existing, 'utf8'), 'unsafe(input)\n')
+    const dest = join(f.target, 'result.json')
+    const attempts = await Promise.allSettled(Array.from({ length: 4 }, () => f.service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: dest })))
+    assert.equal(attempts.filter((item) => item.status === 'fulfilled').length, 1)
+    assert.equal(attempts.filter((item) => item.status === 'rejected').length, 3)
+    const content = await readFile(dest, 'utf8')
+    assert.doesNotThrow(() => JSON.parse(content))
+    const first = await f.service.exportFindings({ scanId: scan.scanId, format: 'markdown' })
+    const second = await f.service.exportFindings({ scanId: scan.scanId, format: 'markdown' })
+    assert.notEqual(first.path, second.path)
+    await assert.rejects(f.service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: join(f.target, '.git', 'hooks', 'pre-commit') }), /version.control/i)
+    const alias = join(f.target, 'scan-alias')
+    await symlink(dirname(completed.reportPath), alias, process.platform === 'win32' ? 'junction' : 'dir')
+    await assert.rejects(f.service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: join(alias, 'new.json') }), /scan storage/i)
+    const outside = join(f.temp, 'outside')
+    await mkdir(outside)
+    const escape = join(f.target, 'outside-alias')
+    await symlink(outside, escape, process.platform === 'win32' ? 'junction' : 'dir')
+    await assert.rejects(f.service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: join(escape, 'new.json') }), /outside/i)
+  } finally { await f.cleanup() }
+})
+
+test('large sealed exports are returned in full', async () => {
+  const f = await fixture()
+  try {
+    const scan = await f.service.startScan({ targetPath: f.target }, 'standard')
+    await f.service.recordScanDraft({ scanId: scan.scanId, ...draft() })
+    const completed = await f.service.completeScan({ scanId: scan.scanId })
+    const dir = dirname(completed.reportPath)
+    const padding = 'x'.repeat(1024 * 1024 + 17)
+    for (const [format, filename] of [['json', 'findings.json'], ['sarif', 'sarif.json']]) {
+      const path = join(dir, filename)
+      const doc = JSON.parse(await readFile(path, 'utf8'))
+      doc.padding = padding
+      await writeFile(path, JSON.stringify(doc))
+      const exported = await f.service.exportContent(scan.scanId, format)
+      assert.equal(JSON.parse(exported.content).padding, padding)
+    }
+    await writeFile(completed.reportPath, padding)
+    assert.equal((await f.service.exportContent(scan.scanId, 'markdown')).content, padding)
+  } finally { await f.cleanup() }
+})
+
+test('exports reject a separate Git metadata directory inside the workspace', async () => {
+  const f = await fixture()
+  try {
+    const metadata = join(f.target, 'metadata')
+    execFileSync('git', ['init', '-q', '--separate-git-dir', metadata, f.target], { stdio: 'ignore' })
+    f.runGit('add', 'src', 'other')
+    f.runGit('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'initial')
+    const scan = await f.service.startScan({ targetPath: f.target }, 'standard')
+    await f.service.recordScanDraft({ scanId: scan.scanId, ...draft() })
+    await f.service.completeScan({ scanId: scan.scanId })
+    await assert.rejects(f.service.exportFindings({ scanId: scan.scanId, format: 'json', outputPath: join(metadata, 'refs', 'heads', 'export') }), /version.control/i)
   } finally { await f.cleanup() }
 })
 

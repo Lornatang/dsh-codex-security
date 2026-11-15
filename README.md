@@ -34,6 +34,8 @@ dsh plugin --profile <name> add @lornatang/dsh-codex-security
 dsh plugin --profile <name> remove @lornatang/dsh-codex-security
 ```
 
+For the GitHub-only 0.1.3 release, use `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-codex-security/releases/download/v0.1.3/lornatang-dsh-codex-security-0.1.3.tgz`. The npm registry version may be older.
+
 The `add` command composes the layer into the profile: the profile's `cordis.patch.yml` gains an insert entry, row id `codex-security`, whose `config` starts from the bundle defaults `maxFiles: 5000`, `maxFileBytes: 1048576`, and `defaultMode: standard`; every other field takes its default from `src/config.ts`. The package manifest points `dsh.bundle.patch` at that document. The `remove` command deletes the row and leaves scans already written under the profile data directory untouched.
 
 Restart DSH after installing or removing, because the row is composed when the profile starts. On start the plugin logs `codex-security: registered 10 skills` and `codex-security: ready (state dir will resolve on first scan)`, and the Web GUI gains a Codex Security entry under Settings; profiles that do not run the Web client still receive the tools and skills.
@@ -41,6 +43,8 @@ Restart DSH after installing or removing, because the row is composed when the p
 A new profile starts with no scans. The first request that touches the store — the workbench status request or `codex_security_inspect_setup` — resolves the state directory and creates `<stateDir>/repositories/`; a scan record appears only after one of the start tools runs, and the plugin itself reviews nothing.
 
 Scans live under `<stateDir>/repositories/<repoKey>/scans/<scanId>/`, where `repoKey` is the first 16 hexadecimal characters of the target root's SHA-256 and `scanId` is `cs_` plus 24 hexadecimal characters; `<stateDir>` defaults to `data/codex-security` next to the profile's `cordis.patch.yml` (for the shipped Web profile, `$DSH_HOME/profiles/web/data/codex-security`). `scan.json` holds the bound target, scope, inventory, progress, and diff list; `index.json` is a rebuildable list cache. Completion requires a draft submitted with `complete: true`, at least one coverage surface, a final disposition for every candidate and every bound diff file, and an unchanged snapshot digest; the plugin then validates the findings, coverage, and manifest documents against `schemas/`, records hashes in `scan-manifest.json`, and seals the scan. Sealed artifacts are immutable, triage is stored separately and stays editable, and exports default to `<stateDir>/exports/<scanId>.<format>`.
+
+Repeated default exports receive a numbered suffix; an explicitly supplied output path must not already exist.
 
 ### What you get
 

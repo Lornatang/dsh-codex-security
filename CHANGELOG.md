@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3] - 2026-11-15
+
+### Fixed
+
+- Prevent exports from replacing existing files or escaping through symlinked directories, and return complete large export documents.
+- Include a GitHub release archive; npm is not published for this release.
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

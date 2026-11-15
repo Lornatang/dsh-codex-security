@@ -168,8 +168,8 @@ export function createSecurityTools(service: SecurityService): ToolDefinition[] 
       scanId: SCAN_ID, findingId: STRING, remediation: { type: 'string', description: 'Concrete remediation: code change, configuration, and verification steps.' }, status: FINDING_STATUS_ENUM,
     }, ['scanId', 'findingId', 'remediation'], (args) => service.setFindingRemediation(args), 60000),
 
-    tool('codex_security_export_findings', 'Export sealed findings for a scan as sarif, json, csv or markdown. Writes to <stateDir>/exports/ by default (or an in-workspace outputPath) and returns the absolute path, byte count and policy gate.', {
-      scanId: SCAN_ID, format: FORMAT_ENUM, outputPath: { type: 'string', description: 'Optional absolute output file path. Must stay inside the workspace/state dir unless allowExportOutsideWorkspace is enabled.' },
+    tool('codex_security_export_findings', 'Export sealed findings for a scan as sarif, json, csv or markdown. Never replaces an existing file; default paths get a unique suffix on collision.', {
+      scanId: SCAN_ID, format: FORMAT_ENUM, outputPath: { type: 'string', description: 'Optional output file path. Must not already exist and must stay inside the workspace/state dir unless allowExportOutsideWorkspace is enabled.' },
     }, ['scanId', 'format'], (args) => service.exportFindings(args), 120000),
 
     tool('codex_security_prepare_review_items', 'Prepare per-file review items for a diff scan: lists every changed file (added/modified/deleted/renamed) so each one is accounted for. Preserves previously recorded item statuses.', {

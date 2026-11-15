@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
+import { link, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 
 export function sha256(value: string | Uint8Array): string {
   return createHash('sha256').update(value).digest('hex')
@@ -34,6 +34,38 @@ export async function writeFileAtomic(path: string, data: string | Uint8Array): 
   }
 }
 
+/** Publish a complete file without ever replacing an existing destination. */
+export async function writeFileExclusive(path: string, data: string | Uint8Array): Promise<void> {
+  const tmp = join(dirname(path), '.' + process.pid + '.' + randomBytes(12).toString('hex') + '.tmp')
+  const handle = await open(tmp, 'wx', 0o600)
+  try {
+    try { await handle.writeFile(data) } finally { await handle.close() }
+    try { await link(tmp, path) } catch (error) {
+      // Some writable filesystems do not support hard links.
+      if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
+      const destination = await open(path, 'wx', 0o600)
+      try { await destination.writeFile(data) } finally { await destination.close() }
+    }
+  } finally {
+    await rm(tmp, { force: true })
+  }
+}
+
+/** Resolve symlinked ancestors even when the final path does not yet exist. */
+export async function canonicalProspectivePath(path: string): Promise<string> {
+  let current = resolve(path)
+  const suffix: string[] = []
+  for (;;) {
+    try { return resolve(await realpath(current), ...suffix) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const parent = dirname(current)
+      if (parent === current) throw error
+      suffix.unshift(basename(current))
+      current = parent
+    }
+  }
+}
+
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   await writeFileAtomic(path, JSON.stringify(value, null, 2) + '\n')
 }
@@ -53,6 +85,13 @@ export async function readText(path: string, limit = 1024 * 1024): Promise<strin
     const value = await readFile(path)
     return value.subarray(0, limit).toString('utf8')
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+export async function readFullText(path: string): Promise<string | undefined> {
+  try { return await readFile(path, 'utf8') } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
   }

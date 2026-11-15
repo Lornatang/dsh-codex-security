@@ -34,6 +34,8 @@ dsh plugin --profile <name> add @lornatang/dsh-codex-security
 dsh plugin --profile <name> remove @lornatang/dsh-codex-security
 ```
 
+安装仅发布到 GitHub 的 0.1.3 版本，请运行 `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-codex-security/releases/download/v0.1.3/lornatang-dsh-codex-security-0.1.3.tgz`。npm 仓库中的版本可能较旧。
+
 `add` 命令把这一层组合进 profile：profile 的 `cordis.patch.yml` 中新增一条 insert 条目，row id 为 `codex-security`，其 `config` 从本包默认值 `maxFiles: 5000`、`maxFileBytes: 1048576`、`defaultMode: standard` 开始；其余字段取 `src/config.ts` 中的默认值。包清单把 `dsh.bundle.patch` 指向该文档。`remove` 命令删除该条目，已经写入 profile 数据目录的扫描保持不变。
 
 安装或移除后重启 DSH，因为该条目在 profile 启动时才会被组合。启动时插件会输出 `codex-security: registered 10 skills` 与 `codex-security: ready (state dir will resolve on first scan)`，Web GUI 的 Settings 中会出现 Codex Security 入口；不运行 Web 客户端的 profile 仍然会获得工具与技能。
@@ -41,6 +43,8 @@ dsh plugin --profile <name> remove @lornatang/dsh-codex-security
 新 profile 初始没有任何扫描。第一次访问存储的请求——工作台的状态请求或 `codex_security_inspect_setup`——会解析状态目录并创建 `<stateDir>/repositories/`；只有在某个 start 工具运行之后才会出现扫描记录，插件本身不会审查任何内容。
 
 扫描位于 `<stateDir>/repositories/<repoKey>/scans/<scanId>/` 下：`repoKey` 是目标根路径 SHA-256 的前 16 个十六进制字符，`scanId` 是 `cs_` 加 24 个十六进制字符；`<stateDir>` 默认为 profile 的 `cordis.patch.yml` 同级的 `data/codex-security`（随 dsh 发布的 Web profile 即 `$DSH_HOME/profiles/web/data/codex-security`）。`scan.json` 保存绑定的目标、范围、清单、进度与 diff 列表；`index.json` 是可重建的列表缓存。完成扫描要求提交 `complete: true` 的草稿、至少一个覆盖面、每个候选与每个绑定 diff 文件的最终处置，以及未变化的快照摘要；随后插件按 `schemas/` 校验 findings、coverage 与 manifest 文档，把哈希记录进 `scan-manifest.json` 并封存扫描。已封存的产物不可修改，triage 单独存储且可继续编辑，导出默认写入 `<stateDir>/exports/<scanId>.<format>`。
+
+重复使用默认路径导出时会增加数字后缀；显式指定的输出路径不能已存在。
 
 ### 本包提供的内容
 
