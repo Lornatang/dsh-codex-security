@@ -6,7 +6,7 @@ export interface SecureExportOptions {
     content: string;
     validate(output: string): Promise<void>;
     /** Internal test barriers; never exposed through the tool interface. */
-    onPhase?(phase: 'pinned' | 'before-mkdir' | 'before-publish' | 'before-cleanup'): Promise<void>;
+    onPhase?(phase: 'pinned' | 'before-mkdir' | 'before-publish' | 'after-publish' | 'before-cleanup'): Promise<void>;
 }
 /** Re-resolve protected locations and retain their original directory identities. */
 export declare function createExportValidator(options: {

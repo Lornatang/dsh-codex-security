@@ -1,7 +1,13 @@
-import { rename, symlink } from 'node:fs/promises'
+import { rename, symlink, unlink } from 'node:fs/promises'
 
 const [directory, moved, replacement, mode] = process.argv.slice(2)
 try {
+  if (mode === 'retarget') {
+    await unlink(directory)
+    await symlink(replacement, directory, process.platform === 'win32' ? 'junction' : 'dir')
+    process.stdout.write('swapped')
+    process.exit(0)
+  }
   if (mode === 'link-only') {
     await symlink(replacement, directory, process.platform === 'win32' ? 'junction' : 'dir')
     process.stdout.write('swapped')

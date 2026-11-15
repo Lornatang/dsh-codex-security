@@ -283,7 +283,7 @@ Export pins the approved directory objects across creation, publication and clea
 
 File export requires the optional `koffi` native package and supported filesystem primitives; it fails closed when these are unavailable. Scanning and in-memory export remain available without that package.
 
-Export also fails closed if a symbolic link or junction is found within scan storage or the target's Git metadata, since it could make an external path an alias of protected storage. Links used for the protected roots themselves remain supported. These checks inspect the protected directory trees at each checkpoint, so export can take longer for large stores or repositories.
+Links and junctions in scan storage or Git metadata are supported when their reachable targets do not alias the export destination. The check follows directory links, including links outside the protected tree, and avoids revisiting directory cycles. Dangling links are supported when their prospective targets are unrelated to the destination. An unresolvable link cycle, an unreadable target, a changing directory or link, or an inspection limit being reached makes export fail closed. Checks traverse the reachable directory trees at mutation checkpoints, so large trees can still increase export time.
 
 | Argument | Type | Required | Description |
 | --- | --- | --- | --- |

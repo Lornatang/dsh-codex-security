@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.6] - 2026-11-15
+
+### Changed
+
+- Allow safe links inside scan storage and Git metadata while rejecting direct or transitive aliases of an export destination.
+- Reduce duplicate protected-tree checks and inspect reachable directories concurrently with bounded work.
+- Add cross-platform tests for linked directories, cycles, dangling targets and concurrent retargeting.
+
 ## [0.1.5] - 2026-11-15
 
 ### Fixed

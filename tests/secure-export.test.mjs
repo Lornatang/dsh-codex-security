@@ -51,9 +51,198 @@ for (const kind of ['scan', 'git']) for (const timing of ['existing', 'before-pu
     const validate = await createExportValidator({ requestedOutput: output, allowedRoots: [workspace], scanRoot, gitDirs: [gitRoot], allowOutside: false })
     await assert.rejects(writeSecureExport({ requestedOutput: output, requested: true, scanId: 'cs_test', extension: 'json', content: 'unsafe', validate,
       onPhase: async phase => { if (phase === 'before-publish') attempted = execFileSync(process.execPath, [attacker, alias, alias + '-unused', workspace, 'link-only'], { encoding: 'utf8' }) },
-    }), kind === 'scan' ? /scan storage contains links/ : /version-control metadata contains links/)
+    }), kind === 'scan' ? /scan storage/ : /version-control metadata/)
     if (timing === 'before-publish') assert.equal(attempted, 'swapped')
     assert.equal(await access(output).then(() => true, () => false), false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+for (const kind of ['scan', 'git']) test(`safe links and directory cycles inside ${kind} storage allow export`, async () => {
+  const root = await makeTemp(join(tmpdir(), 'dcs-export-safe-links-'))
+  const workspace = join(root, 'workspace')
+  const scanRoot = join(root, 'state', 'repositories')
+  const gitRoot = join(root, 'state', 'metadata')
+  const protectedRoot = kind === 'scan' ? scanRoot : gitRoot
+  const outside = join(root, 'shared')
+  const output = join(workspace, 'report.json')
+  try {
+    await mkdir(workspace); await mkdir(scanRoot, { recursive: true }); await mkdir(gitRoot); await mkdir(outside)
+    await mkdir(join(outside, 'nested'))
+    await writeFile(join(outside, 'evidence.txt'), 'evidence')
+    await symlink(outside, join(protectedRoot, 'external'), process.platform === 'win32' ? 'junction' : 'dir')
+    await symlink(protectedRoot, join(outside, 'nested', 'cycle'), process.platform === 'win32' ? 'junction' : 'dir')
+    await symlink(join(outside, 'evidence.txt'), join(protectedRoot, 'file-link'), 'file')
+    const validate = await createExportValidator({ requestedOutput: output, allowedRoots: [workspace], scanRoot, gitDirs: [gitRoot], allowOutside: false })
+    const result = await writeSecureExport({ requestedOutput: output, requested: true, scanId: 'cs_test', extension: 'json', content: 'safe', validate })
+    assert.equal(await readFile(result, 'utf8'), 'safe')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+for (const kind of ['scan', 'git']) test(`transitive links from ${kind} storage cannot alias the output`, async () => {
+  const root = await makeTemp(join(tmpdir(), 'dcs-export-link-chain-'))
+  const workspace = join(root, 'workspace')
+  const scanRoot = join(root, 'state', 'repositories')
+  const gitRoot = join(root, 'state', 'metadata')
+  const protectedRoot = kind === 'scan' ? scanRoot : gitRoot
+  const outside = join(root, 'shared')
+  const output = join(workspace, 'report.json')
+  try {
+    await mkdir(workspace); await mkdir(scanRoot, { recursive: true }); await mkdir(gitRoot); await mkdir(outside)
+    await symlink(outside, join(protectedRoot, 'first'), process.platform === 'win32' ? 'junction' : 'dir')
+    await symlink(workspace, join(outside, 'second'), process.platform === 'win32' ? 'junction' : 'dir')
+    const validate = await createExportValidator({ requestedOutput: output, allowedRoots: [workspace], scanRoot, gitDirs: [gitRoot], allowOutside: false })
+    await assert.rejects(writeSecureExport({ requestedOutput: output, requested: true, scanId: 'cs_test', extension: 'json', content: 'unsafe', validate }), kind === 'scan' ? /scan storage/ : /version.control/)
+    assert.equal(await access(output).then(() => true, () => false), false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+for (const kind of ['scan', 'git']) for (const stage of ['before-publish', 'after-publish']) test(`a safe ${kind} link retargeted at ${stage} is rejected`, async () => {
+  const root = await makeTemp(join(tmpdir(), 'dcs-export-retarget-'))
+  const workspace = join(root, 'workspace')
+  const scanRoot = join(root, 'state', 'repositories')
+  const gitRoot = join(root, 'state', 'metadata')
+  const protectedRoot = kind === 'scan' ? scanRoot : gitRoot
+  const safe = join(root, 'safe')
+  const alias = join(protectedRoot, 'alias')
+  const output = join(workspace, 'report.json')
+  let attempted
+  try {
+    await mkdir(workspace); await mkdir(scanRoot, { recursive: true }); await mkdir(gitRoot); await mkdir(safe)
+    await symlink(safe, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    const validate = await createExportValidator({ requestedOutput: output, allowedRoots: [workspace], scanRoot, gitDirs: [gitRoot], allowOutside: false })
+    await assert.rejects(writeSecureExport({ requestedOutput: output, requested: true, scanId: 'cs_test', extension: 'json', content: 'unsafe', validate,
+      onPhase: async phase => { if (phase === stage) attempted = execFileSync(process.execPath, [attacker, alias, alias + '-unused', workspace, 'retarget'], { encoding: 'utf8' }) },
+    }), kind === 'scan' ? /scan storage/ : /version.control/)
+    assert.equal(attempted, 'swapped')
+    assert.equal(await access(output).then(() => true, () => false), stage === 'after-publish')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('dangling link chains are resolved before creating an export directory', async () => {
+  const root = await makeTemp(join(tmpdir(), 'dcs-export-dangling-'))
+  const workspace = join(root, 'workspace')
+  const scanRoot = join(root, 'state', 'repositories')
+  const future = join(workspace, 'future')
+  const output = join(future, 'report.json')
+  try {
+    await mkdir(workspace); await mkdir(scanRoot, { recursive: true })
+    await symlink(future, join(root, 'indirect'), process.platform === 'win32' ? 'junction' : 'dir')
+    await symlink(join(root, 'indirect'), join(scanRoot, 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
+    const validate = await createExportValidator({ requestedOutput: output, allowedRoots: [workspace], scanRoot, gitDirs: [], allowOutside: false })
+    await assert.rejects(writeSecureExport({ requestedOutput: output, requested: true, scanId: 'cs_test', extension: 'json', content: 'unsafe', validate }), /scan storage/)
+    assert.equal(await access(future).then(() => true, () => false), false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+for (const aliasesOutput of [true, false]) test(`POSIX dangling links resolve parent segments after intermediate links, aliases output=${aliasesOutput}`, { skip: process.platform === 'win32' }, async () => {
+  const root = await makeTemp(join(tmpdir(), 'dcs-export-dangling-parent-'))
+  const workspace = join(root, 'workspace')
+  const scanRoot = join(root, 'state', 'repositories')
+  const future = join(workspace, 'future')
+  const output = aliasesOutput ? join(future, 'report.json') : join(workspace, 'report.json')
+  try {
+    await mkdir(join(workspace, 'nested'), { recursive: true }); await mkdir(scanRoot, { recursive: true })
+    await symlink(join(workspace, 'nested'), join(root, 'bridge'), 'dir')
+    await symlink('../../bridge/../future', join(scanRoot, 'alias'), 'dir')
+    const validate = await createExportValidator({ requestedOutput: output, allowedRoots: [workspace], scanRoot, gitDirs: [], allowOutside: false })
+    const options = { requestedOutput: output, requested: true, scanId: 'cs_test', extension: 'json', content: 'safe', validate }
+    if (aliasesOutput) {
+      await assert.rejects(writeSecureExport(options), /scan storage/)
+      assert.equal(await access(future).then(() => true, () => false), false)
+    } else {
+      const result = await writeSecureExport(options)
+      assert.equal(await readFile(result, 'utf8'), 'safe')
+    }
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('POSIX missing link targets followed by parent segments fail closed', { skip: process.platform === 'win32' }, async () => {
+  const root = await makeTemp(join(tmpdir(), 'dcs-export-missing-parent-'))
+  const workspace = join(root, 'workspace')
+  const scanRoot = join(root, 'state', 'repositories')
+  const output = join(workspace, 'report.json')
+  try {
+    await mkdir(workspace); await mkdir(scanRoot, { recursive: true })
+    await symlink('../../missing/../elsewhere', join(scanRoot, 'alias'), 'dir')
+    const validate = await createExportValidator({ requestedOutput: output, allowedRoots: [workspace], scanRoot, gitDirs: [], allowOutside: false })
+    await assert.rejects(writeSecureExport({ requestedOutput: output, requested: true, scanId: 'cs_test', extension: 'json', content: 'unsafe', validate }), /cannot inspect scan storage/)
+    assert.equal(await access(output).then(() => true, () => false), false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('a dangling link unrelated to the export does not prevent it', async () => {
+  const root = await makeTemp(join(tmpdir(), 'dcs-export-dangling-safe-'))
+  const workspace = join(root, 'workspace')
+  const scanRoot = join(root, 'state', 'repositories')
+  const output = join(workspace, 'report.json')
+  try {
+    await mkdir(workspace); await mkdir(scanRoot, { recursive: true })
+    await symlink(join(root, 'missing'), join(scanRoot, 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
+    const validate = await createExportValidator({ requestedOutput: output, allowedRoots: [workspace], scanRoot, gitDirs: [], allowOutside: false })
+    const result = await writeSecureExport({ requestedOutput: output, requested: true, scanId: 'cs_test', extension: 'json', content: 'safe', validate })
+    assert.equal(await readFile(result, 'utf8'), 'safe')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('a dangling file link to the export destination is rejected', async () => {
+  const root = await makeTemp(join(tmpdir(), 'dcs-export-dangling-file-'))
+  const workspace = join(root, 'workspace')
+  const scanRoot = join(root, 'state', 'repositories')
+  const output = join(workspace, 'report.json')
+  try {
+    await mkdir(workspace); await mkdir(scanRoot, { recursive: true })
+    await symlink(output, join(scanRoot, 'alias'), 'file')
+    const validate = await createExportValidator({ requestedOutput: output, allowedRoots: [workspace], scanRoot, gitDirs: [], allowOutside: false })
+    await assert.rejects(writeSecureExport({ requestedOutput: output, requested: true, scanId: 'cs_test', extension: 'json', content: 'unsafe', validate }), /scan storage/)
+    assert.equal(await access(output).then(() => true, () => false), false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('an unreadable linked directory fails closed', { skip: process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0) }, async () => {
+  const root = await makeTemp(join(tmpdir(), 'dcs-export-unreadable-link-'))
+  const workspace = join(root, 'workspace')
+  const scanRoot = join(root, 'state', 'repositories')
+  const target = join(root, 'unreadable')
+  const output = join(workspace, 'report.json')
+  try {
+    await mkdir(workspace); await mkdir(scanRoot, { recursive: true }); await mkdir(target)
+    await symlink(target, join(scanRoot, 'alias'), 'dir')
+    await chmod(target, 0o000)
+    const validate = await createExportValidator({ requestedOutput: output, allowedRoots: [workspace], scanRoot, gitDirs: [], allowOutside: false })
+    await assert.rejects(writeSecureExport({ requestedOutput: output, requested: true, scanId: 'cs_test', extension: 'json', content: 'unsafe', validate }), /cannot inspect scan storage/)
+    assert.equal(await access(output).then(() => true, () => false), false)
+  } finally {
+    await chmod(target, 0o700).catch(() => {})
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('unresolvable link cycles fail closed without hanging', async () => {
+  const root = await makeTemp(join(tmpdir(), 'dcs-export-dead-cycle-'))
+  const workspace = join(root, 'workspace')
+  const scanRoot = join(root, 'state', 'repositories')
+  const output = join(workspace, 'report.json')
+  try {
+    await mkdir(workspace); await mkdir(scanRoot, { recursive: true })
+    await symlink(join(scanRoot, 'second'), join(scanRoot, 'first'), process.platform === 'win32' ? 'junction' : 'dir')
+    await symlink(join(scanRoot, 'first'), join(scanRoot, 'second'), process.platform === 'win32' ? 'junction' : 'dir')
+    const validate = await createExportValidator({ requestedOutput: output, allowedRoots: [workspace], scanRoot, gitDirs: [], allowOutside: false })
+    await assert.rejects(writeSecureExport({ requestedOutput: output, requested: true, scanId: 'cs_test', extension: 'json', content: 'unsafe', validate }), /cannot inspect scan storage/)
+    assert.equal(await access(output).then(() => true, () => false), false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('export revalidates policy at the mutation checkpoints without duplicate scans', async () => {
+  const root = await makeTemp(join(tmpdir(), 'dcs-export-checkpoints-'))
+  const output = join(root, 'report.json')
+  let phase = 'start'
+  const checks = []
+  try {
+    await writeSecureExport({ requestedOutput: output, requested: true, scanId: 'cs_test', extension: 'json', content: 'safe',
+      validate: async () => { checks.push(phase) },
+      onPhase: async observed => { phase = observed },
+    })
+    assert.deepEqual(checks, ['pinned', 'before-publish', 'after-publish', 'before-cleanup'])
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

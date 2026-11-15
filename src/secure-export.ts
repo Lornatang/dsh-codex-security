@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { closeSync, constants, fstatSync, lstatSync, openSync, writeFile as writeFileCallback } from 'node:fs'
-import { link, lstat, mkdir, readdir, stat } from 'node:fs/promises'
+import type { BigIntStats } from 'node:fs'
+import { link, lstat, mkdir, readdir, readlink, realpath, stat } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, toNamespacedPath } from 'node:path'
 import { getSystemErrorName, promisify } from 'node:util'
@@ -26,7 +27,7 @@ export interface SecureExportOptions {
   content: string
   validate(output: string): Promise<void>
   /** Internal test barriers; never exposed through the tool interface. */
-  onPhase?(phase: 'pinned' | 'before-mkdir' | 'before-publish' | 'before-cleanup'): Promise<void>
+  onPhase?(phase: 'pinned' | 'before-mkdir' | 'before-publish' | 'after-publish' | 'before-cleanup'): Promise<void>
 }
 
 interface ProtectedDirectory { path: string; canonical: string; identity?: { dev: bigint; ino: bigint } }
@@ -42,26 +43,136 @@ async function captureProtected(path: string): Promise<ProtectedDirectory> {
   }
 }
 
-/** Reject links inside protected trees, which can alias external output paths. */
-async function assertProtectedTreeHasNoLinks(root: string, existed: boolean, label: 'scan storage' | 'version-control metadata'): Promise<void> {
-  const pending = [root]
-  while (pending.length) {
-    const directory = pending.pop()!
-    let entries, before, after
+type ProtectedLabel = 'scan storage' | 'version-control metadata'
+interface ProtectedRoot { path: string; existed: boolean; label: ProtectedLabel }
+interface ResolvedLink { path: string; info?: BigIntStats }
+interface InspectionItem extends ProtectedRoot { initial: boolean; kind: 'directory' | 'link' }
+const INSPECTION_CONCURRENCY = 16
+const MAX_PROTECTED_DIRECTORIES = 100000
+const MAX_PROTECTED_LINKS = 100000
+
+function sameNode(a: BigIntStats, b: BigIntStats): boolean { return a.dev === b.dev && a.ino === b.ino }
+function sameSnapshot(a: BigIntStats, b: BigIntStats): boolean {
+  return sameNode(a, b) && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs
+}
+
+/** Resolve links even when their final target or an intermediate target is missing. */
+async function prospectiveLinkTarget(path: string): Promise<ResolvedLink> {
+  const initial = resolve(path)
+  let root = parse(initial).root
+  let parent = root
+  let parts = relative(root, initial).split(sep).filter(Boolean)
+  let hops = 0
+  while (parts.length) {
+    const part = parts.shift()!
+    if (part === '.') continue
+    if (part === '..') { parent = dirname(parent); continue }
+    const current = join(parent, part)
+    let info
+    try { info = await lstat(current, { bigint: true }) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        if (parts.includes('..')) throw new Error('cannot resolve parent components after a missing link target')
+        return { path: resolve(current, ...parts) }
+      }
+      throw error
+    }
+    if (info.isSymbolicLink()) {
+      if (++hops > 40) throw new Error('protected link chain is too long or cyclic')
+      const target = await readlink(current)
+      const after = await lstat(current, { bigint: true })
+      if (!after.isSymbolicLink() || !sameSnapshot(info, after)) throw new Error('protected link changed')
+      if (process.platform === 'win32') {
+        // Win32 normalizes dot segments before resolving reparse points.
+        const expanded = resolve(parent, target, ...parts)
+        root = parse(expanded).root
+        parent = root
+        parts = relative(root, expanded).split(sep).filter(Boolean)
+      } else {
+        if (isAbsolute(target)) { root = parse(target).root; parent = root }
+        parts = [...target.slice(isAbsolute(target) ? root.length : 0).split('/').filter(Boolean), ...parts]
+      }
+      continue
+    }
+    if (parts.length && !info.isDirectory()) throw new Error('protected link target is not a directory')
+    parent = current
+    if (!parts.length) return { path: current, info }
+  }
+  return { path: parent, info: await lstat(parent, { bigint: true }) }
+}
+
+async function resolveProtectedLink(path: string): Promise<ResolvedLink> {
+  const before = await lstat(path, { bigint: true })
+  if (!before.isSymbolicLink()) throw new Error('protected link changed')
+  let result: ResolvedLink
+  try {
+    const targetBefore = await stat(path, { bigint: true })
+    const target = await realpath(path)
+    const info = await lstat(target, { bigint: true })
+    const targetAfter = await stat(path, { bigint: true })
+    if (!sameNode(targetBefore, info) || !sameNode(targetBefore, targetAfter)) throw new Error('protected link target changed')
+    result = { path: target, info }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    result = await prospectiveLinkTarget(path)
+  }
+  const after = await lstat(path, { bigint: true })
+  if (!after.isSymbolicLink() || !sameSnapshot(before, after)) throw new Error('protected link changed')
+  return result
+}
+
+/** Walk reachable protected directories, following links without revisiting cycles. */
+async function assertNoProtectedAliases(roots: readonly ProtectedRoot[], output: string): Promise<void> {
+  const outputParents: BigIntStats[] = []
+  for (let current = dirname(output); ; current = dirname(current)) {
+    try { outputParents.push(await stat(current, { bigint: true })) } catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
+    }
+    if (dirname(current) === current) break
+  }
+  const pending: InspectionItem[] = roots.map((root) => ({ ...root, initial: true, kind: 'directory' }))
+  const visited = new Set<string>()
+  let links = 0
+  const inspect = async (item: InspectionItem): Promise<InspectionItem[]> => {
+    const { path: directory, label } = item
     try {
-      before = await lstat(directory, { bigint: true })
-      if (!before.isDirectory() || before.isSymbolicLink()) throw new Error('protected directory changed or is a link')
-      entries = await readdir(directory, { withFileTypes: true })
-      after = await lstat(directory, { bigint: true })
-      if (!after.isDirectory() || before.dev !== after.dev || before.ino !== after.ino) throw new Error('protected directory changed')
+      if (item.kind === 'link') {
+        if (++links > MAX_PROTECTED_LINKS) throw new Error('protected link inspection limit exceeded')
+        const target = await resolveProtectedLink(directory)
+        if (isWithin(target.path, output)) throw new Error(`codex-security: refusing to export into ${label}`)
+        return target.info?.isDirectory() ? [{ path: target.path, existed: true, label, initial: false, kind: 'directory' }] : []
+      }
+      const before = await lstat(directory, { bigint: true })
+      if (!before.isDirectory() || before.isSymbolicLink()) throw new Error('protected directory changed')
+      if (isWithin(directory, output) || outputParents.some((parent) => sameNode(parent, before))) {
+        throw new Error(`codex-security: refusing to export into ${label}`)
+      }
+      if (before.ino === 0n) throw new Error('protected directory identity is unavailable')
+      const key = `${before.dev}:${before.ino}`
+      if (visited.has(key)) return []
+      visited.add(key)
+      if (visited.size > MAX_PROTECTED_DIRECTORIES) throw new Error('protected directory inspection limit exceeded')
+      const entries = await readdir(directory, { withFileTypes: true })
+      const after = await lstat(directory, { bigint: true })
+      if (!after.isDirectory() || !sameSnapshot(before, after)) throw new Error('protected directory changed')
+      const children: InspectionItem[] = []
+      for (const entry of entries) {
+        const path = join(directory, entry.name)
+        if (entry.isSymbolicLink()) {
+          children.push({ path, existed: true, label, initial: false, kind: 'link' })
+        } else if (entry.isDirectory()) {
+          children.push({ path, existed: true, label, initial: false, kind: 'directory' })
+        }
+      }
+      return children
     } catch (error) {
-      if (!existed && directory === root && (error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      if (!item.existed && item.initial && (error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      if (error instanceof Error && error.message.startsWith('codex-security: refusing')) throw error
       throw new Error(`codex-security: cannot inspect ${label}`, { cause: error })
     }
-    for (const entry of entries) {
-      if (entry.isSymbolicLink()) throw new Error(`codex-security: refusing to export while ${label} contains links`)
-      if (entry.isDirectory()) pending.push(join(directory, entry.name))
-    }
+  }
+  while (pending.length) {
+    const batch = pending.splice(-INSPECTION_CONCURRENCY)
+    for (const children of await Promise.all(batch.map(inspect))) pending.push(...children)
   }
 }
 
@@ -85,8 +196,8 @@ export async function createExportValidator(options: {
     if ([...git.map((item) => item.path), ...currentGitDirs, ...gitPaths].some((path) => isWithin(path, options.requestedOutput)) || gitPaths.some((path) => isWithin(path, output))) {
       throw new Error('codex-security: refusing to export into version-control metadata')
     }
-    await assertProtectedTreeHasNoLinks(scanPaths[1]!, !!scan.identity, 'scan storage')
-    for (const path of new Set(gitPaths)) await assertProtectedTreeHasNoLinks(path, false, 'version-control metadata')
+    const roots: ProtectedRoot[] = [{ path: scanPaths[1]!, existed: !!scan.identity, label: 'scan storage' }]
+    roots.push(...[...new Set(gitPaths)].map((path): ProtectedRoot => ({ path, existed: false, label: 'version-control metadata' })))
     const identities = [scan, ...git].filter((item) => item.identity)
     for (let current = dirname(output); identities.length; current = dirname(current)) {
       try {
@@ -101,6 +212,7 @@ export async function createExportValidator(options: {
     if (!options.allowOutside && !options.allowedRoots.some((root) => isWithin(root, output))) {
       throw new Error('codex-security: refusing to write outside the workspace/state dir; pass an in-workspace outputPath or enable allowExportOutsideWorkspace')
     }
+    await assertNoProtectedAliases(roots, output)
   }
 }
 
@@ -188,7 +300,6 @@ async function writePosixFile(native: NativeFunctions, directories: PosixDirecto
   try {
     if (native.fcntl(fd, 2, 1) < 0) throw nativeError('securing export descriptor')
     await writeFile(fd, options.content, 'utf8')
-    await check()
     await options.onPhase?.('before-publish')
     await check()
     // Publish from the open file, never from the replaceable temporary name.
@@ -208,6 +319,8 @@ async function writePosixFile(native: NativeFunctions, directories: PosixDirecto
         await writeFile(destination, options.content, 'utf8')
       } finally { closeSync(destination) }
     }
+    assertDirectoriesCurrent(directories)
+    await options.onPhase?.('after-publish')
     await check()
   } finally {
     closeSync(fd)
@@ -238,7 +351,7 @@ async function writePosix(options: SecureExportOptions, output: string): Promise
       }
     }
     await options.onPhase?.('pinned')
-    await validatePosix(directories, output, options.validate)
+    assertDirectoriesCurrent(directories)
     for (let index = firstMissing; index < parts.length; index++) {
       const parent = directories[directories.length - 1]!
       const name = parts[index]!
@@ -249,7 +362,7 @@ async function writePosix(options: SecureExportOptions, output: string): Promise
         if (error.code !== 'EEXIST') throw error
       }
       addPosixDirectory(directories, openatDirectory(native, parent.fd, name), join(parent.path, name))
-      await validatePosix(directories, output, options.validate)
+      assertDirectoriesCurrent(directories)
     }
     for (let suffix = 0; ; suffix++) {
       const filename = suffix ? `${options.scanId}-${suffix}.${options.extension}` : basename(output)
@@ -307,7 +420,6 @@ async function writeWindowsBytes(native: WindowsFunctions, handle: bigint, data:
 
 async function writeWindowsFile(native: WindowsFunctions, path: string, options: SecureExportOptions): Promise<void> {
   const temporary = join(dirname(path), `.${process.pid}.${randomBytes(12).toString('hex')}.tmp`)
-  await options.validate(path)
   // DELETE_ON_CLOSE removes our own file by handle; the sharing mode prevents
   // a concurrent process from renaming, replacing or modifying the stage.
   const stage = native.create(toNamespacedPath(temporary), 0xc0010000, 1, null, 1, 0x04000080, null)
@@ -315,7 +427,6 @@ async function writeWindowsFile(native: WindowsFunctions, path: string, options:
   try {
     const data = Buffer.from(options.content, 'utf8')
     await writeWindowsBytes(native, stage, data)
-    await options.validate(path)
     await options.onPhase?.('before-publish')
     await options.validate(path)
     try { await link(temporary, path) } catch (error) {
@@ -329,6 +440,7 @@ async function writeWindowsFile(native: WindowsFunctions, path: string, options:
       }
       try { await writeWindowsBytes(native, destination, data) } finally { native.close(destination) }
     }
+    await options.onPhase?.('after-publish')
     await options.validate(path)
     await options.onPhase?.('before-cleanup')
   } finally { native.close(stage) }
@@ -420,8 +532,8 @@ async function writeWindows(options: SecureExportOptions, output: string): Promi
       const handle = pinWindowsDirectory(native, path)
       if (handle === undefined) throw new Error('codex-security: export directory changed during creation')
       guards.push({ path, handle })
-      await options.validate(output)
     }
+    if (firstMissing < components.length) await options.validate(output)
     // A non-deletable child keeps the final directory nonempty, preventing it
     // from becoming a reparse point while write-sharing is enabled for link().
     const sentinelPath = join(targetDir, `.codex-export-${randomBytes(12).toString('hex')}.lock`)
