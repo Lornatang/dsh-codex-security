@@ -204,7 +204,12 @@ test('plugin starts an automatic scan through real DSH tools, preset and subagen
     assert.equal(record.status, 'completed', record.error)
     assert.equal(record.findingsCount, 0)
     const status = tools.get('codex_security_get_deep_scan_status', parent, parentSet)
-    const progress = await status.execute({ scanId: started.scanId }, { agent: parent, signal })
+    let progress
+    do {
+      progress = await status.execute({ scanId: started.scanId }, { agent: parent, signal })
+      if (progress.status === 'completed') break
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    } while (Date.now() < deadline)
     assert.equal(progress.attempts, 1)
     assert.equal(progress.status, 'completed')
     assert.equal('claimHash' in progress, false)
