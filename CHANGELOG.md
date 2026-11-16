@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7] - 2026-11-16
+
+### Fixed
+
+- Load platform-specific native export binaries without dependency install scripts,
+  so a new DSH profile can install the bundle under pnpm's default build policy.
+
 ## [0.1.6] - 2026-11-15
 
 ### Changed

@@ -4,6 +4,7 @@ import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, r
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { createExportValidator, writeSecureExport } from '../lib/secure-export.js'
@@ -16,6 +17,22 @@ const gitAttacker = fileURLToPath(new URL('./fixtures/retarget-git-metadata.mjs'
 const exporter = fileURLToPath(new URL('./fixtures/export-process.mjs', import.meta.url))
 const run = promisify(execFile)
 const makeTemp = async (prefix) => realpath(await mkdtemp(prefix))
+const require = createRequire(import.meta.url)
+
+test('native export prebuild loads without dependency install scripts', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  const nativeName = `@koromix/koffi-${process.platform}-${process.arch}`
+  assert.equal(manifest.optionalDependencies.koffi, undefined)
+  assert.ok(manifest.optionalDependencies[nativeName], `missing optional native package ${nativeName}`)
+  const nativeManifest = JSON.parse(await readFile(require.resolve(`${nativeName}/package.json`), 'utf8'))
+  for (const script of ['preinstall', 'install', 'postinstall', 'prepare']) {
+    assert.equal(nativeManifest.scripts?.[script], undefined, `${nativeName} has an ${script} script`)
+  }
+  const native = require(nativeName)
+  assert.equal(native.version, manifest.optionalDependencies[nativeName])
+  assert.equal(typeof native.load, 'function')
+  assert.equal(typeof native.errno, 'function')
+})
 
 for (const kind of ['scan', 'git']) test(`logical ${kind} storage paths remain protected through child links`, async () => {
   const root = await makeTemp(join(tmpdir(), 'dcs-export-inner-alias-'))

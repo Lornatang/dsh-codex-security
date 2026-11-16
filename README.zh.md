@@ -34,7 +34,7 @@ dsh plugin --profile <name> add @lornatang/dsh-codex-security
 dsh plugin --profile <name> remove @lornatang/dsh-codex-security
 ```
 
-安装 GitHub 上的 0.1.6 版本，请运行 `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-codex-security/releases/download/v0.1.6/lornatang-dsh-codex-security-0.1.6.tgz`。npm 仓库中的版本可能较旧。
+安装 GitHub 上的 0.1.7 版本，请运行 `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-codex-security/releases/download/v0.1.7/lornatang-dsh-codex-security-0.1.7.tgz`。npm 仓库中的版本可能较旧。
 
 `add` 命令把这一层组合进 profile：profile 的 `cordis.patch.yml` 中新增一条 insert 条目，row id 为 `codex-security`，其 `config` 从本包默认值 `maxFiles: 5000`、`maxFileBytes: 1048576`、`defaultMode: standard` 开始；其余字段取 `src/config.ts` 中的默认值。包清单把 `dsh.bundle.patch` 指向该文档。`remove` 命令删除该条目，已经写入 profile 数据目录的扫描保持不变。
 
@@ -174,6 +174,7 @@ start 工具解析目标、绑定版本或 diff 事实、在限额内建立可�
 - **一个状态目录只允许一个进程** — 这一层按 profile 安装，profile 之间不共享状态；锁是进程内的，因此不支持两个 DSH 进程使用同一个状态目录，失败的中途封存也可能在运行的扫描中留下中间文件。
 - **封存是单向的** — agent 产物只能在扫描运行期间写入，`codex_security_save_artifact` 会拒绝封存文件与内部路径；triage 是完成后的唯一修改途径，且不会改动已封存文档。
 - **默认限制导出范围** — 写入状态目录、进程工作目录与目标根路径之外需要 `allowExportOutsideWorkspace: true`；导出到 `repositories/` 下的扫描存储始终被拒绝。
+- **文件导出需要原生支持** — 文件导出需要与平台匹配的可选二进制包；缺少时导出会安全失败，扫描与内存导出仍可用。该二进制包没有依赖安装脚本。
 - **清单上限决定证据范围** — `maxFiles` 与 `maxFileBytes` 限制可审查清单，不可读文件会变成警告，快照摘要只覆盖清单内的内容，因此超出上限的文件不在证据范围内。
 - **比较不能证明修复** — `codex_security_compare_scans` 要求目标、模式与范围兼容、覆盖完整且清单未被截断的已完成扫描，并且只做指纹分类；指纹缺失不等于已验证修复。
 

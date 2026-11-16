@@ -10,11 +10,20 @@ import { canonicalProspectivePath, isWithin } from './util.js'
 
 const writeFile = promisify(writeFileCallback)
 const require = createRequire(import.meta.url)
-interface KoffiApi { load(name: string | null): { func(signature: string): unknown }; errno(): number }
+interface KoffiApi { version: string; load(name: string | null): { func(signature: string): unknown }; errno(): number }
+const KOFFI_VERSION = '3.3.8'
 let koffi: KoffiApi | undefined
 function getKoffi(): KoffiApi {
   if (koffi) return koffi
-  try { return koffi = require('koffi') as KoffiApi } catch (error) {
+  try {
+    // Load the platform prebuild directly. The koffi wrapper's install script
+    // is rejected by pnpm's default dependency-build policy in a DSH profile.
+    const native = require(`@koromix/koffi-${process.platform}-${process.arch}`) as KoffiApi
+    if (native.version !== KOFFI_VERSION || typeof native.load !== 'function' || typeof native.errno !== 'function') {
+      throw new Error('incompatible native filesystem module')
+    }
+    return koffi = native
+  } catch (error) {
     throw new Error('codex-security: secure export requires native filesystem support for this platform', { cause: error })
   }
 }

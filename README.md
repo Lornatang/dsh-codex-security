@@ -34,7 +34,7 @@ dsh plugin --profile <name> add @lornatang/dsh-codex-security
 dsh plugin --profile <name> remove @lornatang/dsh-codex-security
 ```
 
-For the GitHub 0.1.6 release, use `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-codex-security/releases/download/v0.1.6/lornatang-dsh-codex-security-0.1.6.tgz`. The npm registry version may be older.
+For the GitHub 0.1.7 release, use `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-codex-security/releases/download/v0.1.7/lornatang-dsh-codex-security-0.1.7.tgz`. The npm registry version may be older.
 
 The `add` command composes the layer into the profile: the profile's `cordis.patch.yml` gains an insert entry, row id `codex-security`, whose `config` starts from the bundle defaults `maxFiles: 5000`, `maxFileBytes: 1048576`, and `defaultMode: standard`; every other field takes its default from `src/config.ts`. The package manifest points `dsh.bundle.patch` at that document. The `remove` command deletes the row and leaves scans already written under the profile data directory untouched.
 
@@ -174,6 +174,7 @@ These limits define when the layer does not fit and what it needs from the profi
 - **One process per state directory** — the layer is added per profile and shares no state between profiles; its locks are in-process, so two DSH processes on one state directory are unsupported and a failed seal can leave intermediate files in a running scan.
 - **Sealing is one-way** — agent artifacts can be written only while a scan is running, and `codex_security_save_artifact` refuses sealed and internal paths; triage is the only post-completion mutation, and it never changes the sealed documents.
 - **Exports stay local by default** — writing outside the state directory, the process working directory, and the target root requires `allowExportOutsideWorkspace: true`; exporting into the scan storage under `repositories/` is always refused.
+- **Native support for file exports** — the matching optional platform binary must be available for file export; if it is missing, export fails closed while scans and in-memory exports remain available. The binary package has no dependency install script.
 - **Inventory caps bound the evidence** — `maxFiles` and `maxFileBytes` limit the reviewable inventory, unreadable files become warnings, and the snapshot digest covers only inventoried content, so files outside the caps are outside the evidence.
 - **Comparison does not prove a fix** — `codex_security_compare_scans` requires completed scans with a compatible target, mode, and scope, complete coverage, and non-truncated inventories, and it classifies fingerprints only; a missing fingerprint is not a verified fix.
 
