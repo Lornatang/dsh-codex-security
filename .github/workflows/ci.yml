@@ -21,7 +21,7 @@ jobs:
           - { os: ubuntu-24.04, node: '22.19.0' }
           - { os: ubuntu-24.04, node: '24' }
           - { os: windows-2025, node: '24' }
-          - { os: macos-15, node: '24' }
+          - { os: macos-26, node: '24' }
           - { os: macos-15-intel, node: '24' }
     steps:
       - uses: actions/checkout@v4

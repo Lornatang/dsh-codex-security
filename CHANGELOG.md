@@ -13,6 +13,7 @@
 - Bind worker reads and evidence to verified target objects and file snapshots; keep incomplete coverage and conflicting findings visible.
 - Serialize shared indexes and scan mutations across processes and tolerate transient Windows file-sharing conflicts during atomic replacement.
 - Fail closed when target inventory cannot be enumerated or Git metadata cannot be resolved.
+- Use the macOS 26 ARM runner when macOS 15 ARM runners are unavailable.
 
 ## [0.1.7] - 2026-11-16
 
