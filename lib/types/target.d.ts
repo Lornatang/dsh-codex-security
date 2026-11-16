@@ -7,6 +7,7 @@ export interface ResolveTargetOptions {
     workingTree?: boolean;
     maxFiles: number;
     maxFileBytes: number;
+    signal?: AbortSignal;
 }
 export interface ResolvedTarget {
     target: TargetInfo;

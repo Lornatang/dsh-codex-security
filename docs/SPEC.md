@@ -5,10 +5,10 @@ The project provides an independent DSH implementation of a skill-driven static 
 ## Product surface
 
 - Package: `@lornatang/dsh-codex-security`; plugin and patch row: `codex-security`.
-- Host: 29 `codex_security_*` tools and ten bundled skills. `tools` and `skills` are required Cordis services.
+- Host: 31 `codex_security_*` tools and 16 bundled skills. `tools` and `skills` are required Cordis services.
 - Client: one **Codex Security** settings section backed by local HTTP routes.
 - Scan modes: `standard`, `prompt-only`, `deep`. `codex_security_start_scan` uses the configured default; named start tools select their mode explicitly.
-- Deep-scan budgets are recorded for the agent workflow. The host does not launch or supervise discovery workers.
+- Automatic Deep dispatches isolated DSH workers, enforces concurrency, attempt, no-new and wall-clock limits, and journals recovery. A manual mode remains available.
 
 ## Configuration
 
@@ -21,8 +21,8 @@ The project provides an independent DSH implementation of a skill-driven static 
 | `failOnSeverity` | `high` | Policy threshold or `off`. |
 | `allowExportOutsideWorkspace` | `false` | Permit explicitly requested exports outside permitted roots. |
 | `maxScanAgeDays` | `30` | Workbench age warning; no automatic deletion. |
-| `deepWorkers` | `4` | Default recorded worker budget. |
-| `deepMaxDiscoveryRuns` | `40` | Default recorded discovery-run budget. |
+| `deepWorkers` | `4` | Default concurrent worker limit. |
+| `deepMaxDiscoveryRuns` | `40` | Default maximum discovery attempts. |
 
 ## Lifecycle and storage
 
@@ -32,7 +32,7 @@ Completion requires a draft marked complete, at least one coverage surface, cand
 
 Comparison requires completed scans with matching target root, target kind, scan mode and include/exclude paths. Diff scans must share a base revision. Truncated, deferred, missing or incomplete coverage is not comparable. Fingerprint disappearance alone does not prove remediation.
 
-State is local. Scan changes are serialized within one service instance and individual files are written atomically; cross-process access to one state directory is unsupported. The index can be rebuilt from scan records.
+State is local. SQLite OS locks serialize campaign ownership, scan mutations and index writes across processes; lock files are never unlinked. The state directory must be trusted and use a local filesystem with reliable SQLite locking. JSON files are individually atomic, not a multi-file transaction. The index can be rebuilt from scan records.
 
 ## Workbench and routes
 
@@ -40,4 +40,4 @@ The host registers `/plugins/codex-security` routes for status, configuration, s
 
 ## Security and scope
 
-The host uses read-only Git queries and does not build or execute the reviewed target. Explicit exports can write outside scan storage according to the configured policy. Skills instruct the agent to treat repository content as untrusted and redact secrets; these are agent-workflow requirements rather than host-enforced guarantees.
+The host uses read-only Git queries and does not build or execute the reviewed target. Automatic workers are restricted to verified, bound source reads and structured output; the DSH model provider may use the network. Explicit exports can write outside scan storage according to the configured policy. Skills instruct the agent to treat repository content as untrusted and redact secrets; these are agent-workflow requirements rather than host-enforced guarantees.

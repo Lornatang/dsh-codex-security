@@ -7,6 +7,8 @@ export interface ScanIndex {
 }
 export interface CreateScanInput {
     scanId: string;
+    managedParent?: string;
+    managedRootIdentity?: ScanRecord['managedRootIdentity'];
     mode: ScanRecord['mode'];
     promptOnly: boolean;
     target: ScanRecord['target'];
@@ -24,7 +26,6 @@ export declare function repoKeyFor(rootPath: string): string;
 export declare function summarize(record: ScanRecord): ScanSummary;
 export declare class ScanStore {
     readonly stateDir: string;
-    private indexCache;
     private queue;
     constructor(stateDir: string);
     private get indexPath();
@@ -34,7 +35,9 @@ export declare class ScanStore {
     loadIndex(): Promise<ScanIndex>;
     private rebuildIndex;
     saveIndex(index: ScanIndex): Promise<void>;
-    create(input: CreateScanInput): Promise<ScanRecord>;
+    create(input: CreateScanInput, options?: {
+        signal?: AbortSignal;
+    }): Promise<ScanRecord>;
     private writeRecord;
     get(scanId: string): Promise<{
         record: ScanRecord;

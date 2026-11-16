@@ -1,6 +1,7 @@
 import type { Config } from './config.js';
 import type { PluginContext } from './types.js';
 import { ScanStore } from './store.js';
+import type { WorkerSnapshot } from './deep-worker.js';
 export declare const FORMATS: readonly ["sarif", "json", "csv", "markdown"];
 export type ExportFormat = (typeof FORMATS)[number];
 type Json = Record<string, unknown>;
@@ -13,9 +14,12 @@ export declare class SecurityService {
     readonly config: Config;
     private readonly ctx;
     private readonly scanLocks;
+    private readonly managedInvocations;
     constructor(ctx: PluginContext, options?: SecurityServiceOptions);
-    /** Serialize complete read-modify-write operations for each scan within this process. */
+    /** Serialize complete read-modify-write operations across instances and processes. */
     private withScanLock;
+    /** Internal capability: tool-provided JSON cannot grant access to a managed scan. */
+    withManagedAccess<T>(args: Json, operation: () => Promise<T>): Promise<T>;
     private requireRunningScan;
     private ready;
     private requireScan;
@@ -24,7 +28,11 @@ export declare class SecurityService {
     inspectSetup(): Promise<Json>;
     inspectTarget(args: Json): Promise<Json>;
     startDefaultScan(args: Json): Promise<Json>;
-    startScan(args: Json, kind: 'standard' | 'prompt-only' | 'deep'): Promise<Json>;
+    startScan(args: Json, kind: 'standard' | 'prompt-only' | 'deep', options?: {
+        scanId?: string;
+        managedParent?: string;
+        signal?: AbortSignal;
+    }): Promise<Json>;
     private scanInstructions;
     private promptOnlyPrompt;
     getScanContext(args: Json): Promise<Json>;
@@ -32,10 +40,16 @@ export declare class SecurityService {
     updateScanContext(args: Json): Promise<Json>;
     private updateScanContextUnlocked;
     updateScanProgress(args: Json): Promise<Json>;
+    /** Set an absolute count from the durable coordinator journal after a restart. */
+    setManagedProgress(args: Json): Promise<void>;
     private updateScanProgressUnlocked;
-    recordScanDraft(args: Json): Promise<Json>;
+    recordScanDraft(args: Json, options?: {
+        workerSnapshot: WorkerSnapshot;
+        signal?: AbortSignal;
+    }): Promise<Json>;
     private recordScanDraftUnlocked;
     private collectEvidenceLines;
+    private collectBoundEvidenceLines;
     recordDiscoveryCandidates(args: Json): Promise<Json>;
     private recordDiscoveryCandidatesUnlocked;
     private severityOf;
@@ -47,7 +61,9 @@ export declare class SecurityService {
     saveArtifact(args: Json): Promise<Json>;
     private saveArtifactUnlocked;
     readArtifact(args: Json): Promise<Json>;
-    completeScan(args: Json): Promise<Json>;
+    completeScan(args: Json, options?: {
+        signal?: AbortSignal;
+    }): Promise<Json>;
     private completeScanUnlocked;
     failScan(args: Json): Promise<Json>;
     private failScanUnlocked;

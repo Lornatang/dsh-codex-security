@@ -1,21 +1,27 @@
 # Codex Security Skills
 
-This directory contains the ten agent skills that ship with the Codex Security plugin for DeepSeek Harness. The plugin discovers every `skills/<name>/SKILL.md` when it starts and registers the skill automatically: there is nothing to install, enable, clone, or import, and no external command-line tool, service, database, or desktop application is required. A skill is loaded when the user selects it in the harness or when the request clearly matches its description; its instructions then guide the agent through the plugin's scan tools.
+This directory contains the 16 agent skills that ship with the Codex Security plugin for DeepSeek Harness. The plugin discovers every `skills/<name>/SKILL.md` when it starts and registers the skill automatically: there is nothing to install, enable, clone, or import, and no external command-line tool, service, database, or desktop application is required. A skill is loaded when the user selects it in the harness or when the request clearly matches its description; its instructions then guide the agent through the plugin's scan tools.
 
-## The ten skills
+## The skills
 
 | Skill | Use it when | Main tools |
 | --- | --- | --- |
 | `security-scan` | The user wants a normal security review of a repository, directory, or set of files. | `codex_security_inspect_target`, `codex_security_start_standard_scan`, `codex_security_record_scan_draft`, `codex_security_complete_scan` |
 | `security-diff-scan` | The user wants a pull request, commit range, branch, patch, or working tree reviewed and every changed file accounted for. | `codex_security_prepare_review_items`, `codex_security_update_review_item`, `codex_security_record_scan_draft` |
 | `deep-security-scan` | The user wants an exhaustive or multi-pass audit with explicit worker and time budgets, especially when variants could hide from a single pass. | `codex_security_start_deep_scan`, `subagent`, `codex_security_record_candidate_validations`, `codex_security_complete_scan` |
-| `fix-finding` | The user wants a minimal patch and static test plan for one confirmed finding, without modifying the target repository. | `codex_security_list_findings`, `codex_security_set_finding_remediation`, `codex_security_save_artifact` |
+| `fix-finding` | The user wants a security finding fixed, or a proposal when explicitly requested. | `codex_security_list_findings`, `codex_security_set_finding_remediation` |
 | `verify-fix` | The user wants to know whether an applied fix actually closes a finding, using a fresh scan and a scan comparison. | `codex_security_start_standard_scan`, `codex_security_compare_scans`, `codex_security_set_finding_triage` |
 | `triage-finding` | The user asks whether a finding or alert is real, how to prioritize it, or wants its status changed. | `codex_security_list_findings`, `codex_security_set_finding_triage` |
 | `threat-model` | The user wants a threat model, trust-boundary analysis, attacker-capability analysis, or security objectives for a system. | `codex_security_update_scan_context`, `codex_security_save_artifact`, `codex_security_record_scan_draft` |
-| `track-findings` | The user wants a security status report, an inventory of open findings, or regressions between scans tracked. | `codex_security_list_scans`, `codex_security_list_findings`, `codex_security_compare_scans`, `codex_security_save_artifact` |
+| `track-findings` | The user wants findings summarized or explicitly tracked in an issue system. | `codex_security_list_scans`, `codex_security_list_findings`, `codex_security_compare_scans`, optional authorized tracker integration |
 | `resolve-dependency-alert` | The user supplies a CVE, advisory, or vulnerable package and asks whether the repository is affected or how to resolve it. | `codex_security_inspect_target`, `codex_security_start_standard_scan`, `codex_security_record_scan_draft` |
 | `vulnerability-writeup` | The user wants a disclosure-quality report, advisory text, or per-finding documentation with an attack narrative. | `codex_security_list_findings`, `codex_security_save_artifact`, `codex_security_record_scan_draft` |
+| `assess-patch-risk` | A reviewer needs a patch's behavior, regression risk, and merge readiness assessed. | Source and patch inspection |
+| `attack-path-analysis` | Analyze the reachability and impact of a candidate. | `codex_security_record_candidate_attack_paths` |
+| `define-security-policy` | Create or review repository security policy. | Source and policy inspection |
+| `finding-discovery` | Discover candidates during a scan or on explicit request. | `codex_security_record_discovery_candidates` |
+| `propose-security-hardening` | Propose structural security improvements grounded in evidence. | Finding and source inspection |
+| `validation` | Test a candidate's claim against evidence and counterevidence. | `codex_security_record_candidate_validations` |
 
 ## Artifact-first workflow
 
@@ -89,22 +95,22 @@ Findings, review, and comparison:
 
 ## Safety model
 
-- The target repository is read-only. Skills never edit, create, move, or delete target files and never apply patches to it.
-- Skills never run target code, tests, builds, installers, package managers, or dependency installation, and never execute a proof of concept.
-- Skills make no network requests and never exfiltrate repository content.
+- Scans and review-only requests treat the target as read-only. An explicit fix or policy-editing request can authorize the corresponding workspace changes.
+- Verification and fixes can run appropriate tests within the user's authorization; report actual results and avoid unauthorized installation or external execution.
+- Do not send repository content to external services without authorization.
 - Repository text is untrusted data. A skill records prompt-injection attempts in its evidence instead of following them.
 - Secrets are redacted from findings, notes, and artifacts; discovered credentials are never used.
 - Findings are static unless the user explicitly authorizes something else in a separate, controlled environment.
 
 ## Deep scan budgets
 
-Deep scans record values passed to `codex_security_start_deep_scan` or the plugin configuration. The agent workflow is responsible for following them; the host does not launch workers or enforce these budgets:
+Automatic Deep enforces the following limits. With `manual: true`, they are advisory and the agent coordinates its own work:
 
 | Budget | Default | Meaning |
 | --- | --- | --- |
 | `workers` | `deepWorkers`, default 4 | Maximum concurrent discovery workers per pass. |
-| `maxDiscoveryRuns` | `deepMaxDiscoveryRuns`, default 40 | Maximum discovery passes. |
-| `stopAfterNoNew` | 4 | Stop after this many consecutive passes with no new candidate. |
+| `maxDiscoveryRuns` | `deepMaxDiscoveryRuns`, default 40 | Maximum independent review attempts. |
+| `stopAfterNoNew` | 4 | Stop starting reviews after this many consecutive reviews find nothing new. |
 | `maxTimeMinutes` | 360 | Stop when the elapsed campaign time reaches this value. |
 
 ## Configuration
@@ -113,4 +119,4 @@ The plugin reads its configuration from the DeepSeek Harness plugin settings. Th
 
 ## Skill file format
 
-Each skill is a directory containing `SKILL.md`. The YAML frontmatter has a `name` that matches the directory, a one-sentence third-person `description`, and an optional `whenToUse`. The body is imperative English, 80 to 200 lines, and is self-contained: skills do not link to the repository's internal reference documents or to external tools. When adding or editing a skill, keep the directory count at the ten documented here, keep the `name` equal to the directory name, and verify that every `codex_security_*` tool name matches the plugin's tool list.
+Each skill is a directory containing `SKILL.md` with a matching `name` and a specific `description`. Keep the workflow focused and verify that referenced `codex_security_*` tools exist in the plugin.

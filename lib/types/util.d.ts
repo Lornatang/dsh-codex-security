@@ -1,4 +1,6 @@
 export declare function sha256(value: string | Uint8Array): string;
+/** A workspace's identity must not depend on its current revision or scan mode. */
+export declare function stableTargetId(rootPath: string): string;
 export declare function nowIso(): string;
 export declare function newId(prefix: string, hexChars?: number): string;
 export declare function shortId(value: string, length?: number): string;
@@ -34,9 +36,11 @@ export declare function listFiles(root: string, options: {
     include?: string[];
     filter?: (path: string) => boolean;
     followSymlinks?: boolean;
+    signal?: AbortSignal;
 }): Promise<{
     files: string[];
     truncated: boolean;
     excluded: string[];
+    symlinks: string[];
 }>;
 export declare function normalizeLine(value: string): string;

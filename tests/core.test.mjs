@@ -80,7 +80,7 @@ test('apply registers the documented tool surface and bundled skills', async () 
   const stateDir = await tempDir('dcs-state-')
   const ctx = mockContext(join(stateDir, 'cordis.patch.yml'))
   apply(ctx, { stateDir })
-  assert.equal(ctx.registeredTools.length, 29)
+  assert.equal(ctx.registeredTools.length, 31)
   const names = ctx.registeredTools.map((tool) => tool.name).sort()
   assert.deepEqual(names, [...TOOL_NAMES].sort())
   for (const tool of ctx.registeredTools) {
@@ -101,17 +101,22 @@ test('apply registers the documented tool surface and bundled skills', async () 
   assert.equal(ctx.registeredSkills.length, skills.length)
 })
 
-test('finding identity is stable across line moves and unique per location', () => {
+test('finding identity is stable across scans and occurrence identity is scan-specific', () => {
   const base = sampleDraft('cs_' + 'a'.repeat(24)).findings[0]
   const first = normalizeFinding('cs_' + 'a'.repeat(24), base, { rootPath: '/tmp' })
   const moved = normalizeFinding('cs_' + 'a'.repeat(24), { ...base, locations: [{ path: 'src/app.js', startLine: 40 }] }, { rootPath: '/tmp' })
   const elsewhere = normalizeFinding('cs_' + 'a'.repeat(24), { ...base, locations: [{ path: 'src/other.js', startLine: 3 }] }, { rootPath: '/tmp' })
+  const nextScan = normalizeFinding('cs_' + 'b'.repeat(24), base, { rootPath: '/tmp' })
+  const otherTarget = normalizeFinding('cs_' + 'a'.repeat(24), base, { rootPath: '/tmp/other' })
   assert.match(first.findingId, /^csf_[a-f0-9]{24}$/)
   assert.match(first.occurrenceId, /^occ_[a-f0-9]{24}$/)
   assert.match(first.fingerprints.primary, /^codex-security\/v1:sha256:[a-f0-9]{64}$/)
   assert.equal(first.fingerprints.primary, moved.fingerprints.primary)
   assert.notEqual(first.fingerprints.primary, elsewhere.fingerprints.primary)
-  assert.notEqual(first.occurrenceId, moved.occurrenceId)
+  assert.equal(first.occurrenceId, moved.occurrenceId)
+  assert.equal(first.findingId, nextScan.findingId)
+  assert.notEqual(first.occurrenceId, nextScan.occurrenceId)
+  assert.notEqual(first.findingId, otherTarget.findingId)
   assert.equal(normalizeAnchor('injection/sql', 'src/app.js'), normalizeAnchor('injection/sql', 'src/app.js'))
 })
 
@@ -162,6 +167,8 @@ test('scan lifecycle seals findings, coverage, report and manifest', async () =>
     const manifest = JSON.parse(await readFile(join(scanDir, 'scan-manifest.json'), 'utf8'))
     assert.equal(manifest.documentType, 'codex-security.scan-manifest')
     assert.equal(manifest.scan.status, 'completed')
+    assert.equal(manifest.scan.scope.runtimeStatus, 'unknown')
+    assert.equal(manifest.scan.scope.validationMode, 'unspecified')
     assert.ok(manifest.scan.artifacts.length >= 4, 'manifest should seal findings, coverage, sarif and report')
     for (const artifact of manifest.scan.artifacts) {
       const bytes = await readFile(join(scanDir, artifact.path))

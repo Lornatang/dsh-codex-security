@@ -7,6 +7,7 @@
     "documentType": { "const": "codex-security.coverage" },
     "schemaVersion": { "const": "1.0" },
     "scanId": { "type": "string", "minLength": 1 },
+    "completeness": { "enum": ["complete", "partial", "unknown"] },
     "mode": {
       "enum": [
         "repository",
@@ -124,6 +125,7 @@
     "schemaVersion",
     "scanId",
     "mode",
+    "completeness",
     "inventoryStrategy",
     "includePaths",
     "excludePaths",

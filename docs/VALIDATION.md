@@ -8,9 +8,9 @@ npm run typecheck
 npm test
 ```
 
-`npm test` rebuilds the tracked host and client output and runs the Node test suite. The suite exercises real Cordis, DSH skill and tool registries, and the DSH tool execution pipeline without a user profile. It also covers scoped and diff targets, untracked files, snapshot changes, draft completeness, candidate concurrency, comparison guards, sealed artifacts, schema validation and index recovery.
+`npm test` rebuilds the tracked host and client output and runs the Node test suite. The suite exercises real Cordis, DSH skill and tool registries, and the DSH tool execution pipeline without a user profile. It also covers scoped and diff targets, untracked files, snapshot changes, worker tool guards, bounded reads and delivered-content receipts, Deep budgets and deduplication, process death and authorized takeover, cross-process cancellation and index races, draft completeness, comparison guards, sealed artifacts and schema validation.
 
-CI runs these checks on Node 22.19 and 24. After committing any regenerated `lib/` files, `git diff --exit-code -- lib` verifies that another build is reproducible. The integration test uses the pinned DSH 0.2.2-rc.2 development packages. It does not replace a full manual DSH application or agent review.
+CI runs these checks on Linux, macOS and Windows with Node 22.19 and 24 as configured in the matrix. After committing any regenerated `lib/` files, `git diff --exit-code -- lib` verifies that another build is reproducible. The integration test uses the pinned DSH 0.2.2-rc.2 development packages. It does not replace a full manual DSH application or agent review.
 
 ## Package inspection
 
@@ -22,10 +22,12 @@ The package must include `lib/`, `cordis.patch.yml`, `skills/`, `references/`, `
 
 ## Optional isolated DSH check
 
-Use a disposable DSH home rather than a working profile. Generate a tarball with `npm pack`, capture the actual filename printed by npm, and install it into a profile under that temporary home. Check that the host loads, all ten skills can be read, and the workbench routes respond. Remove the disposable home after the check. This exercise may need npm registry access to install package dependencies.
+Use a disposable DSH home rather than a working profile. Generate a tarball with `npm pack`, capture the actual filename printed by npm, and install it into a profile under that temporary home. Check that the host loads, all 16 skills can be read, and the workbench routes respond. Remove the disposable home after the check. This exercise may need npm registry access to install package dependencies.
 
 ## Artifact checks
 
 Findings, coverage and manifest documents are validated against `schemas/` by the host before sealing. The regression suite independently validates generated examples and checks the SHA-256 digest of a sealed supporting artifact. Check a complete manual review as well when changing the workflow: account for each bound diff file, compare only compatible completed scans, and verify that attempted post-completion writes fail.
+
+For an optional interoperability check, set `CODEX_SECURITY_REFERENCE_ROOT` to an installed Codex Security 0.1.32 plugin directory and run `npm test` with Python available on `PATH`. The test passes a generated completed scan to that installation's `scripts/validate_scan_contract.py`. CI does not require that separate plugin.
 
 A green build confirms the exercised behavior. It does not establish that an agent actually reviewed every claimed surface or that the target has no vulnerabilities.

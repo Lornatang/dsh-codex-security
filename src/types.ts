@@ -14,7 +14,7 @@ export const SEVERITY_SCORE: Record<Severity, number> = { critical: 9.5, high: 8
 export const FINDING_STATUSES: FindingStatus[] = ['open', 'triaged', 'fixed', 'false_positive', 'accepted_risk', 'wont_fix']
 export const DISPOSITIONS: Disposition[] = ['reported', 'no_issue_found', 'rejected', 'not_applicable', 'needs_follow_up']
 
-export interface FindingLocation { path: string; startLine: number; endLine?: number; role?: string }
+export interface FindingLocation { path: string; startLine: number; endLine?: number; role?: string; [key: string]: unknown }
 
 export interface FindingValidation {
   status?: string
@@ -48,13 +48,15 @@ export interface Finding {
   fingerprints: { algorithm: 'codex-security/v1'; primary: string }
   title: string
   summary: string
-  severity: { level: Severity; score: number; scoringSystem?: string; rationale?: string; changeConditions?: string }
+  severity: { level: Severity; score: number; scoringSystem?: string; vector?: string; rationale?: string; changeConditions?: string }
   confidence: { level: Confidence; rationale: string }
   taxonomy: { category: string; cwe: string[] }
   locations: FindingLocation[]
   remediation: string
-  rootCause?: string
+  rootCause?: string | Record<string, unknown>
+  root_cause?: string | Record<string, unknown> | null
   codeEvidence?: unknown[]
+  code_evidence?: unknown[] | null
   validation?: FindingValidation
   attackPath?: FindingAttackPath
   remediationTests?: unknown[]
@@ -65,30 +67,35 @@ export interface Finding {
   [key: string]: unknown
 }
 
-export interface DraftSurface { id?: string; label: string; disposition: Disposition; receiptRefs?: string[]; riskArea?: string; notes?: string }
-export interface DraftExclusion { pattern: string; reason: string }
-export interface DraftDeferred { id: string; reason: string; paths?: string[]; surfaceIds?: string[] }
+export interface DraftSurface { id?: string; label: string; disposition: Disposition; receiptRefs?: string[]; riskArea?: string; notes?: string; [key: string]: unknown }
+export interface DraftExclusion { pattern: string; reason: string; [key: string]: unknown }
+export interface DraftDeferred { id: string; reason: string; paths?: string[]; surfaceIds?: string[]; [key: string]: unknown }
 export interface DraftReviewState {
+  completeness?: 'complete' | 'partial' | 'unknown'
   surfaces: DraftSurface[]
   explicitExclusions?: DraftExclusion[]
   deferred?: DraftDeferred[]
   resolvedDeferred?: { id: string; reason: string }[]
   openQuestions?: { question: string; followUpPrompt?: string }[]
+  [key: string]: unknown
 }
 
 export interface DraftFinding {
   ruleId: string
   title: string
   summary: string
-  severity: { level: Severity; score?: number; rationale?: string; scoringSystem?: string; changeConditions?: string }
+  severity: { level: Severity; score?: number; rationale?: string; scoringSystem?: string; vector?: string; changeConditions?: string }
   confidence: { level: Confidence; rationale: string }
   taxonomy?: { category: string; cwe?: string | string[] }
   locations: FindingLocation[]
   remediation: string
   anchor?: string
   instance?: string
-  rootCause?: string
+  identity?: { anchor: string; instance?: string }
+  rootCause?: string | Record<string, unknown>
+  root_cause?: string | Record<string, unknown> | null
   codeEvidence?: unknown[]
+  code_evidence?: unknown[] | null
   validation?: FindingValidation
   attackPath?: FindingAttackPath
   remediationTests?: unknown[]
@@ -96,12 +103,13 @@ export interface DraftFinding {
   writeup?: { reportPath?: string }
   provenance?: { source?: string; [key: string]: unknown }
   extensions?: Record<string, unknown>
+  [key: string]: unknown
 }
 
 export interface ScanDraftInput {
   scanId?: string
   complete?: boolean
-  scope?: { includePaths: string[]; excludePaths: string[]; summary?: string }
+  scope?: { includePaths?: string[]; excludePaths?: string[]; summary?: string; runtimeStatus?: string; validationMode?: string; context?: string; limitations?: string[]; [key: string]: unknown }
   threatModel?: Record<string, unknown> | string
   findings: DraftFinding[]
   reviewState: DraftReviewState
@@ -147,6 +155,9 @@ export interface DeepBudget { workers: number; maxDiscoveryRuns: number; stopAft
 
 export interface ScanRecord {
   scanId: string
+  /** A managed Deep campaign owns mutations of this scan while it runs. */
+  managedParent?: string
+  managedRootIdentity?: { dev: string; ino: string }
   repoKey: string
   mode: ScanMode
   status: ScanStatus
@@ -189,9 +200,9 @@ export interface ScanSummary {
 
 export interface Candidate {
   candidateId: string
-  ruleId: string
+  ruleId?: string
   title: string
-  severity: Severity
+  severity?: Severity
   path: string
   startLine?: number
   anchor: string
@@ -199,6 +210,9 @@ export interface Candidate {
   summary?: string
   status: 'discovered' | 'validating' | 'validated' | 'rejected' | 'reported'
   createdAt: string
+  discovery?: Record<string, unknown>
+  validation?: Record<string, unknown>
+  attackPath?: Record<string, unknown>
 }
 
 export interface CandidateValidation {
@@ -209,6 +223,7 @@ export interface CandidateValidation {
   evidence?: unknown[]
   limitations?: string[]
   recordedAt: string
+  validation?: Record<string, unknown>
 }
 
 export interface CandidateAttackPath {
@@ -220,6 +235,7 @@ export interface CandidateAttackPath {
   preconditions?: string[]
   controls?: string[]
   recordedAt: string
+  attackPath?: Record<string, unknown>
 }
 
 export interface ReviewItem {
@@ -239,6 +255,7 @@ export interface CoverageDocument {
   schemaVersion: '1.0'
   scanId: string
   mode: string
+  completeness?: 'complete' | 'partial' | 'unknown'
   inventoryStrategy: string
   includePaths: string[]
   excludePaths: string[]
@@ -271,7 +288,8 @@ export interface PluginContext {
   tools: { register(definition: ToolDefinition, options?: { when?: unknown }): () => void }
   skills: { register(skill: SkillRegistration): () => void }
   logger: { info(...args: unknown[]): void; warn(...args: unknown[]): void; error(...args: unknown[]): void }
-  effect(callback: () => void | (() => void), label?: string): () => void
+  effect(callback: () => void | (() => void | Promise<void>), label?: string): () => void
+  inject?(services: string[], callback: (ctx: PluginContext) => void): unknown
   on?(event: string, callback: (name?: string) => void): (() => void) | undefined
   get?(name: string): unknown
   profileContext?: { patchPath?: string }

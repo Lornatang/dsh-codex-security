@@ -1,8 +1,8 @@
 import { lstat, realpath, stat } from 'node:fs/promises'
-import { basename, relative, resolve, sep } from 'node:path'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { InventoryInfo, ScopeInfo, TargetInfo, TargetKind } from './types.js'
-import { isProbablyBinary, languageOf, listFiles, matchesAny, matchesScopePath, normalizeLine, sha256, truncate } from './util.js'
+import { isProbablyBinary, languageOf, listFiles, matchesAny, matchesScopePath, normalizeLine, stableTargetId, truncate } from './util.js'
 import { changedFiles, currentBranch, fileDigest, headRevision, remoteUrl, repoRoot, resolveRevision, statusEntries, trackedFiles } from './git.js'
 
 export interface ResolveTargetOptions {
@@ -13,6 +13,7 @@ export interface ResolveTargetOptions {
   workingTree?: boolean
   maxFiles: number
   maxFileBytes: number
+  signal?: AbortSignal
 }
 
 export interface ResolvedTarget {
@@ -26,11 +27,21 @@ export interface ResolvedTarget {
 
 const DEFAULT_EXCLUDES = ['.git/**','node_modules/**','dist/**','build/**','out/**','coverage/**','.next/**','.nuxt/**','vendor/**','target/**','.venv/**','__pycache__/**','*.min.js','*.min.css','*.map','*.lock','package-lock.json','pnpm-lock.yaml','yarn.lock','Cargo.lock','poetry.lock','uv.lock','composer.lock','go.sum']
 export async function resolveTarget(options: ResolveTargetOptions): Promise<ResolvedTarget> {
+  options.signal?.throwIfAborted()
   const requestedPath = resolve(options.targetPath && options.targetPath.length > 0 ? options.targetPath : process.cwd())
   const targetStat = await stat(requestedPath).catch(() => undefined)
   if (!targetStat?.isDirectory()) throw new Error('codex-security: targetPath must be an existing directory: ' + requestedPath)
   const requested = await realpath(requestedPath)
-  const repo = await repoRoot(requested)
+  const repo = await repoRoot(requested, options.signal)
+  if (!repo) {
+    if (process.env['GIT_DIR'] !== undefined || process.env['GIT_COMMON_DIR'] !== undefined) throw new Error('codex-security: cannot resolve configured Git metadata')
+    for (let directory = requested; ; directory = dirname(directory)) {
+      try { await lstat(join(directory, '.git')); throw new Error('codex-security: cannot resolve Git metadata at ' + directory) } catch (error) {
+        if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
+      }
+      if (dirname(directory) === directory) break
+    }
+  }
   const rootPath = repo ?? requested
   const gitRepo = repo !== undefined
   const requestedIncludes = (options.includePaths ?? []).map((value) => value.trim()).filter(Boolean)
@@ -48,10 +59,10 @@ export async function resolveTarget(options: ResolveTargetOptions): Promise<Reso
   const scope: ScopeInfo = { includePaths: includePaths.length > 0 ? includePaths : ['.'], excludePaths }
   const warnings: string[] = []
 
-  const status = gitRepo ? await statusEntries(rootPath) : []
+  const status = gitRepo ? await statusEntries(rootPath, options.signal) : []
   const dirty = status.length > 0
-  const revision = gitRepo ? await headRevision(rootPath) : undefined
-  const baseRevision = options.diffTarget ? await resolveRevision(rootPath, options.diffTarget) : undefined
+  const revision = gitRepo ? await headRevision(rootPath, options.signal) : undefined
+  const baseRevision = options.diffTarget ? await resolveRevision(rootPath, options.diffTarget, options.signal) : undefined
   if (options.diffTarget && !baseRevision) throw new Error('codex-security: diff target could not be resolved: ' + options.diffTarget)
   if (!gitRepo && (options.diffTarget || options.workingTree)) throw new Error('codex-security: diff scans require a git repository')
 
@@ -64,12 +75,14 @@ export async function resolveTarget(options: ResolveTargetOptions): Promise<Reso
   const changedPaths = diffFiles ? new Set(diffFiles.map((file) => file.path)) : undefined
   const inventoryFiles = await collectFiles(rootPath, options, includePaths, excludePaths, gitRepo, changedPaths)
   const files = inventoryFiles.files
+  for (const path of inventoryFiles.symlinks ?? []) warnings.push('inventory omitted symbolic link: ' + path)
   if (files.length === 0) warnings.push('no reviewable text files matched the requested scope')
   if (inventoryFiles.truncated) warnings.push('inventory truncated at maxFiles=' + options.maxFiles)
 
   let totalBytes = 0
   const languages: Record<string, number> = {}
   for (const file of files) {
+    options.signal?.throwIfAborted()
     try {
       const info = await stat(resolve(rootPath, file))
       totalBytes += info.size
@@ -86,17 +99,17 @@ export async function resolveTarget(options: ResolveTargetOptions): Promise<Reso
     for (const file of [...files].sort()) {
       const absolute = resolve(rootPath, file)
       const info = await lstat(absolute).catch(() => undefined)
-      const digest = info?.isFile() ? await fileDigest(absolute) : undefined
+      const digest = info?.isFile() ? await fileDigest(absolute, options.signal) : undefined
       if (!digest) warnings.push('snapshot could not hash file: ' + file)
       snapshot.update('\u0000' + file + '\u0000' + (digest ?? 'unavailable'))
     }
   }
   const snapshotDigest = 'codex-security-snapshot/v1:sha256:' + snapshot.digest('hex')
 
-  const targetId = 'target_' + sha256(kind + '\u0000' + rootPath + '\u0000' + (revision ?? '') + '\u0000' + (options.diffTarget ?? '')).slice(0, 24)
-  const remoteValue = gitRepo ? await remoteUrl(rootPath) : undefined
+  const targetId = stableTargetId(rootPath)
+  const remoteValue = gitRepo ? await remoteUrl(rootPath, options.signal) : undefined
   const remote = remoteValue ? safeRemote(remoteValue) : undefined
-  const branch = gitRepo ? await currentBranch(rootPath) : undefined
+  const branch = gitRepo ? await currentBranch(rootPath, options.signal) : undefined
   const target: TargetInfo = {
     kind,
     targetId,
@@ -140,11 +153,11 @@ function safeRemote(value: string): string | undefined {
   } catch { return undefined }
 }
 
-async function collectFiles(rootPath: string, options: ResolveTargetOptions, includePaths: string[], excludePaths: string[], gitRepo: boolean, changedPaths?: Set<string>): Promise<{ files: string[]; truncated: boolean }> {
+async function collectFiles(rootPath: string, options: ResolveTargetOptions, includePaths: string[], excludePaths: string[], gitRepo: boolean, changedPaths?: Set<string>): Promise<{ files: string[]; truncated: boolean; symlinks?: string[] }> {
   const exclude = [...DEFAULT_EXCLUDES, ...excludePaths]
   if (gitRepo) {
-    const tracked = await trackedFiles(rootPath)
-    const status = await statusEntries(rootPath)
+    const tracked = await trackedFiles(rootPath, options.signal)
+    const status = await statusEntries(rootPath, options.signal)
     const untracked = status.filter((entry) => entry.code === '??').map((entry) => entry.path)
     const all = Array.from(new Set([...tracked, ...untracked]))
     let scoped = all.filter((path) => !matchesAny(path, exclude))
@@ -155,7 +168,7 @@ async function collectFiles(rootPath: string, options: ResolveTargetOptions, inc
     scoped = scoped.filter((path) => !isProbablyBinary(path))
     return { files: scoped.slice(0, options.maxFiles), truncated: scoped.length > options.maxFiles }
   }
-  return listFiles(rootPath, { maxFiles: options.maxFiles, exclude, include: includePaths.filter((value) => value !== '.' && value !== './').length > 0 ? includePaths : undefined, filter: (path) => !isProbablyBinary(path) })
+  return listFiles(rootPath, { maxFiles: options.maxFiles, exclude, include: includePaths.filter((value) => value !== '.' && value !== './').length > 0 ? includePaths : undefined, filter: (path) => !isProbablyBinary(path), signal: options.signal })
 }
 
 function displayNameFor(rootPath: string, remote: string | undefined): string {

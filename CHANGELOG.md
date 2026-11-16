@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.8] - 2026-11-16
+
+### Added
+
+- Coordinate independent, restricted Deep review workers with bounded concurrency, attempts, no-new stopping and wall-clock time.
+- Persist campaign progress and recovery claims, with authenticated cross-process resume and cancellation.
+- Add Codex-compatible skill workflows and artifact contracts, plus cross-platform worker, recovery and concurrency tests.
+
+### Fixed
+
+- Bind worker reads and evidence to verified target objects and file snapshots; keep incomplete coverage and conflicting findings visible.
+- Serialize shared indexes and scan mutations across processes and tolerate transient Windows file-sharing conflicts during atomic replacement.
+- Fail closed when target inventory cannot be enumerated or Git metadata cannot be resolved.
+
 ## [0.1.7] - 2026-11-16
 
 ### Fixed

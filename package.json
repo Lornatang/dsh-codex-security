@@ -1,6 +1,6 @@
 {
   "name": "@lornatang/dsh-codex-security",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Agent-native security review workbench for DeepSeek Harness, modeled on OpenAI codex-security: sealed scans, findings contract, deep-scan orchestration and SARIF/JSON export.",
   "type": "module",
   "license": "Apache-2.0",
@@ -31,6 +31,10 @@
     "./client": {
       "types": "./lib/types/client/index.d.ts",
       "default": "./lib/client.js"
+    },
+    "./worker-preset": {
+      "types": "./lib/types/worker-preset.d.ts",
+      "default": "./lib/worker-preset.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
@@ -81,7 +85,11 @@
     "@deepseek-ai/dsh-skill": ">=0.2.2-rc.2 <0.3.0"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-agent-preset-registry": "0.2.2-rc.2",
     "@deepseek-ai/dsh-skill": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-subagent": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-subagent-spawn-in-process": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-tool-executor-native": "0.2.2-rc.2",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.2",
     "@types/node": "^22.18.0",
     "@types/react": "^18.3.31",

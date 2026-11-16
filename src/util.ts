@@ -1,9 +1,15 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { link, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 
 export function sha256(value: string | Uint8Array): string {
   return createHash('sha256').update(value).digest('hex')
+}
+
+/** A workspace's identity must not depend on its current revision or scan mode. */
+export function stableTargetId(rootPath: string): string {
+  return 'target_sha256_' + sha256('local-workspace\u0000' + resolve(rootPath))
 }
 
 export function nowIso(): string {
@@ -27,7 +33,16 @@ export async function writeFileAtomic(path: string, data: string | Uint8Array): 
   const tmp = join(dirname(path), '.' + process.pid + '.' + Date.now() + '.' + randomBytes(4).toString('hex') + '.tmp')
   try {
     await writeFile(tmp, data)
-    await rename(tmp, path)
+    const deadline = Date.now() + 2000
+    let pause = 10
+    for (;;) {
+      try { await rename(tmp, path); break } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '') || Date.now() >= deadline) throw error
+        await delay(pause)
+        pause = Math.min(100, pause * 2)
+      }
+    }
   } catch (error) {
     await rm(tmp, { force: true }).catch(() => undefined)
     throw error
@@ -214,23 +229,26 @@ export function formatBytes(value: number): string {
   return (value / (1024 * 1024)).toFixed(1) + ' MB'
 }
 
-export async function listFiles(root: string, options: { maxFiles: number; exclude: string[]; include?: string[]; filter?: (path: string) => boolean; followSymlinks?: boolean }): Promise<{ files: string[]; truncated: boolean; excluded: string[] }> {
+export async function listFiles(root: string, options: { maxFiles: number; exclude: string[]; include?: string[]; filter?: (path: string) => boolean; followSymlinks?: boolean; signal?: AbortSignal }): Promise<{ files: string[]; truncated: boolean; excluded: string[]; symlinks: string[] }> {
   const files: string[] = []
   const excluded: string[] = []
+  const symlinks: string[] = []
   let truncated = false
   const walk = async (dir: string, relBase: string): Promise<void> => {
+    options.signal?.throwIfAborted()
     if (truncated) return
     let entries
     try {
       entries = await readdir(dir, { withFileTypes: true })
-    } catch { return }
+    } catch (error) { throw new Error('codex-security: cannot enumerate target directory: ' + dir, { cause: error }) }
     entries.sort((a, b) => a.name.localeCompare(b.name))
     for (const entry of entries) {
+      options.signal?.throwIfAborted()
       if (truncated) return
       const rel = relBase ? relBase + '/' + entry.name : entry.name
       if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === '.hg' || entry.name === '.svn') { excluded.push(rel); continue }
       if (matchesAny(rel, options.exclude)) { excluded.push(rel); continue }
-      if (entry.isSymbolicLink()) { excluded.push(rel); continue }
+      if (entry.isSymbolicLink()) { excluded.push(rel); symlinks.push(rel); continue }
       if (entry.isDirectory()) { await walk(join(dir, entry.name), rel); continue }
       if (!entry.isFile()) continue
       if (options.include && options.include.length > 0 && !matchesScopePath(rel, options.include)) continue
@@ -240,7 +258,7 @@ export async function listFiles(root: string, options: { maxFiles: number; exclu
     }
   }
   await walk(root, '')
-  return { files, truncated, excluded }
+  return { files, truncated, excluded, symlinks }
 }
 
 export function normalizeLine(value: string): string {

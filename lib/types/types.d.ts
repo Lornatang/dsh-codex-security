@@ -16,6 +16,7 @@ export interface FindingLocation {
     startLine: number;
     endLine?: number;
     role?: string;
+    [key: string]: unknown;
 }
 export interface FindingValidation {
     status?: string;
@@ -57,6 +58,7 @@ export interface Finding {
         level: Severity;
         score: number;
         scoringSystem?: string;
+        vector?: string;
         rationale?: string;
         changeConditions?: string;
     };
@@ -70,8 +72,10 @@ export interface Finding {
     };
     locations: FindingLocation[];
     remediation: string;
-    rootCause?: string;
+    rootCause?: string | Record<string, unknown>;
+    root_cause?: string | Record<string, unknown> | null;
     codeEvidence?: unknown[];
+    code_evidence?: unknown[] | null;
     validation?: FindingValidation;
     attackPath?: FindingAttackPath;
     remediationTests?: unknown[];
@@ -93,18 +97,22 @@ export interface DraftSurface {
     receiptRefs?: string[];
     riskArea?: string;
     notes?: string;
+    [key: string]: unknown;
 }
 export interface DraftExclusion {
     pattern: string;
     reason: string;
+    [key: string]: unknown;
 }
 export interface DraftDeferred {
     id: string;
     reason: string;
     paths?: string[];
     surfaceIds?: string[];
+    [key: string]: unknown;
 }
 export interface DraftReviewState {
+    completeness?: 'complete' | 'partial' | 'unknown';
     surfaces: DraftSurface[];
     explicitExclusions?: DraftExclusion[];
     deferred?: DraftDeferred[];
@@ -116,6 +124,7 @@ export interface DraftReviewState {
         question: string;
         followUpPrompt?: string;
     }[];
+    [key: string]: unknown;
 }
 export interface DraftFinding {
     ruleId: string;
@@ -126,6 +135,7 @@ export interface DraftFinding {
         score?: number;
         rationale?: string;
         scoringSystem?: string;
+        vector?: string;
         changeConditions?: string;
     };
     confidence: {
@@ -140,8 +150,14 @@ export interface DraftFinding {
     remediation: string;
     anchor?: string;
     instance?: string;
-    rootCause?: string;
+    identity?: {
+        anchor: string;
+        instance?: string;
+    };
+    rootCause?: string | Record<string, unknown>;
+    root_cause?: string | Record<string, unknown> | null;
     codeEvidence?: unknown[];
+    code_evidence?: unknown[] | null;
     validation?: FindingValidation;
     attackPath?: FindingAttackPath;
     remediationTests?: unknown[];
@@ -154,14 +170,20 @@ export interface DraftFinding {
         [key: string]: unknown;
     };
     extensions?: Record<string, unknown>;
+    [key: string]: unknown;
 }
 export interface ScanDraftInput {
     scanId?: string;
     complete?: boolean;
     scope?: {
-        includePaths: string[];
-        excludePaths: string[];
+        includePaths?: string[];
+        excludePaths?: string[];
         summary?: string;
+        runtimeStatus?: string;
+        validationMode?: string;
+        context?: string;
+        limitations?: string[];
+        [key: string]: unknown;
     };
     threatModel?: Record<string, unknown> | string;
     findings: DraftFinding[];
@@ -211,6 +233,12 @@ export interface DeepBudget {
 }
 export interface ScanRecord {
     scanId: string;
+    /** A managed Deep campaign owns mutations of this scan while it runs. */
+    managedParent?: string;
+    managedRootIdentity?: {
+        dev: string;
+        ino: string;
+    };
     repoKey: string;
     mode: ScanMode;
     status: ScanStatus;
@@ -279,9 +307,9 @@ export interface ScanSummary {
 }
 export interface Candidate {
     candidateId: string;
-    ruleId: string;
+    ruleId?: string;
     title: string;
-    severity: Severity;
+    severity?: Severity;
     path: string;
     startLine?: number;
     anchor: string;
@@ -289,6 +317,9 @@ export interface Candidate {
     summary?: string;
     status: 'discovered' | 'validating' | 'validated' | 'rejected' | 'reported';
     createdAt: string;
+    discovery?: Record<string, unknown>;
+    validation?: Record<string, unknown>;
+    attackPath?: Record<string, unknown>;
 }
 export interface CandidateValidation {
     candidateId: string;
@@ -298,6 +329,7 @@ export interface CandidateValidation {
     evidence?: unknown[];
     limitations?: string[];
     recordedAt: string;
+    validation?: Record<string, unknown>;
 }
 export interface CandidateAttackPath {
     candidateId: string;
@@ -308,6 +340,7 @@ export interface CandidateAttackPath {
     preconditions?: string[];
     controls?: string[];
     recordedAt: string;
+    attackPath?: Record<string, unknown>;
 }
 export interface ReviewItem {
     reviewId: string;
@@ -337,6 +370,7 @@ export interface CoverageDocument {
     schemaVersion: '1.0';
     scanId: string;
     mode: string;
+    completeness?: 'complete' | 'partial' | 'unknown';
     inventoryStrategy: string;
     includePaths: string[];
     excludePaths: string[];
@@ -388,7 +422,8 @@ export interface PluginContext {
         warn(...args: unknown[]): void;
         error(...args: unknown[]): void;
     };
-    effect(callback: () => void | (() => void), label?: string): () => void;
+    effect(callback: () => void | (() => void | Promise<void>), label?: string): () => void;
+    inject?(services: string[], callback: (ctx: PluginContext) => void): unknown;
     on?(event: string, callback: (name?: string) => void): (() => void) | undefined;
     get?(name: string): unknown;
     profileContext?: {

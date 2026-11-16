@@ -9,18 +9,19 @@ const MAX_BUFFER = 64 * 1024 * 1024
 
 export interface GitResult { ok: boolean; stdout: string; stderr: string }
 
-export async function git(root: string, args: string[], timeoutMs = 60000): Promise<GitResult> {
+export async function git(root: string, args: string[], timeoutMs = 60000, signal?: AbortSignal): Promise<GitResult> {
   try {
-    const result = await run('git', args, { cwd: root, timeout: timeoutMs, maxBuffer: MAX_BUFFER, windowsHide: true })
+    const result = await run('git', args, { cwd: root, timeout: timeoutMs, maxBuffer: MAX_BUFFER, windowsHide: true, signal })
     return { ok: true, stdout: String(result.stdout), stderr: String(result.stderr) }
   } catch (error) {
+    signal?.throwIfAborted()
     const failed = error as { stdout?: string; stderr?: string; message?: string }
     return { ok: false, stdout: String(failed.stdout ?? ''), stderr: String(failed.stderr ?? failed.message ?? 'git failed') }
   }
 }
 
-export async function gitString(root: string, args: string[], timeoutMs?: number): Promise<string | undefined> {
-  const result = await git(root, args, timeoutMs)
+export async function gitString(root: string, args: string[], timeoutMs?: number, signal?: AbortSignal): Promise<string | undefined> {
+  const result = await git(root, args, timeoutMs, signal)
   return result.ok ? result.stdout.trim() : undefined
 }
 
@@ -28,31 +29,31 @@ export async function isGitRepo(root: string): Promise<boolean> {
   return (await gitString(root, ['rev-parse', '--is-inside-work-tree'])) === 'true'
 }
 
-export async function repoRoot(path: string): Promise<string | undefined> {
-  return gitString(path, ['rev-parse', '--show-toplevel'])
+export async function repoRoot(path: string, signal?: AbortSignal): Promise<string | undefined> {
+  return gitString(path, ['rev-parse', '--show-toplevel'], undefined, signal)
 }
 
-export async function headRevision(root: string): Promise<string | undefined> {
-  return gitString(root, ['rev-parse', 'HEAD'])
+export async function headRevision(root: string, signal?: AbortSignal): Promise<string | undefined> {
+  return gitString(root, ['rev-parse', 'HEAD'], undefined, signal)
 }
 
-export async function currentBranch(root: string): Promise<string | undefined> {
-  return gitString(root, ['rev-parse', '--abbrev-ref', 'HEAD'])
+export async function currentBranch(root: string, signal?: AbortSignal): Promise<string | undefined> {
+  return gitString(root, ['rev-parse', '--abbrev-ref', 'HEAD'], undefined, signal)
 }
 
-export async function remoteUrl(root: string): Promise<string | undefined> {
-  return gitString(root, ['config', '--get', 'remote.origin.url'])
+export async function remoteUrl(root: string, signal?: AbortSignal): Promise<string | undefined> {
+  return gitString(root, ['config', '--get', 'remote.origin.url'], undefined, signal)
 }
 
-export async function resolveRevision(root: string, ref: string): Promise<string | undefined> {
-  return gitString(root, ['rev-parse', '--verify', ref + '^{commit}'])
+export async function resolveRevision(root: string, ref: string, signal?: AbortSignal): Promise<string | undefined> {
+  return gitString(root, ['rev-parse', '--verify', ref + '^{commit}'], undefined, signal)
 }
 
 export interface StatusEntry { code: string; path: string }
 
-export async function statusEntries(root: string): Promise<StatusEntry[]> {
-  const result = await git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
-  if (!result.ok) return []
+export async function statusEntries(root: string, signal?: AbortSignal): Promise<StatusEntry[]> {
+  const result = await git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], undefined, signal)
+  if (!result.ok) throw new Error('codex-security: git status failed: ' + result.stderr.trim())
   const items: StatusEntry[] = []
   const parts = result.stdout.split('\u0000').filter(Boolean)
   for (let i = 0; i < parts.length; i++) {
@@ -67,9 +68,9 @@ export async function statusEntries(root: string): Promise<StatusEntry[]> {
   return items
 }
 
-export async function trackedFiles(root: string): Promise<string[]> {
-  const result = await git(root, ['ls-files', '-z'])
-  if (!result.ok) return []
+export async function trackedFiles(root: string, signal?: AbortSignal): Promise<string[]> {
+  const result = await git(root, ['ls-files', '-z'], undefined, signal)
+  if (!result.ok) throw new Error('codex-security: git file inventory failed: ' + result.stderr.trim())
   return result.stdout.split('\u0000').filter(Boolean)
 }
 
@@ -134,10 +135,10 @@ export async function worktreeDigest(root: string): Promise<string> {
   return hash.digest('hex')
 }
 
-export async function fileDigest(path: string): Promise<string | undefined> {
+export async function fileDigest(path: string, signal?: AbortSignal): Promise<string | undefined> {
   try {
     const hash = createHash('sha256')
-    for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer)
+    for await (const chunk of createReadStream(path, { signal })) hash.update(chunk as Buffer)
     return hash.digest('hex')
-  } catch { return undefined }
+  } catch { signal?.throwIfAborted(); return undefined }
 }

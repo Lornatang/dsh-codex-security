@@ -6,7 +6,7 @@ import type { PluginContext } from './types.js';
 export declare const name = "codex-security";
 export declare const inject: string[];
 export { Config };
-export declare const version = "0.1.7";
+export declare const version = "0.1.8";
 export declare const packageName = "@lornatang/dsh-codex-security";
 export { SecurityService };
 export type { ConfigType };

@@ -3,13 +3,12 @@ import type {
   ScanRecord, Severity, Confidence, Disposition, FindingStatus,
 } from './types.js'
 import { DISPOSITIONS, SEVERITIES, SEVERITY_SCORE } from './types.js'
-import { compareSeverity, normalizeLine, sanitizeRelative, sha256, slugify } from './util.js'
+import { compareSeverity, normalizeLine, sanitizeRelative, sha256, slugify, stableTargetId } from './util.js'
 import { VERSION } from './constants.js'
 
 const SEVERITY_SET = new Set<string>(SEVERITIES)
 const CONFIDENCE_SET = new Set<string>(['high','medium','low'])
 const DISPOSITION_SET = new Set<string>(DISPOSITIONS)
-const CATEGORY_SET = new Set<string>(['injection','authentication','authorization','cryptography','secrets','injection-deserialization','path-traversal','ssrf','memory-safety','race-condition','dependency','configuration','information-disclosure','business-logic','other'])
 
 export function normalizeRuleId(value: string): string {
   const normalized = String(value ?? '').toLowerCase().replace(/[^a-z0-9._/-]+/g, '-').replace(/^[^a-z0-9]+/, '').replace(/\/+$/, '')
@@ -26,28 +25,30 @@ export function normalizeAnchor(ruleId: string, path: string, lineText?: string,
   return value.slice(0, 200)
 }
 
-export function fingerprintFor(ruleId: string, path: string, anchor: string, instance?: string): string {
-  return 'codex-security/v1:sha256:' + sha256(['codex-security/v1', ruleId, path, anchor, instance ?? ''].join('\u0000'))
+export function fingerprintFor(targetId: string, ruleId: string, anchor: string, instance?: string): string {
+  return 'codex-security/v1:sha256:' + sha256(['codex-security/v1', targetId, ruleId, anchor, instance ?? ''].join('\u0000'))
 }
 
-export function idsFor(ruleId: string, path: string, anchor: string, instance?: string, startLine = 1): { findingId: string; occurrenceId: string; primary: string } {
-  const primary = fingerprintFor(ruleId, path, anchor, instance)
+export function idsFor(scanId: string, targetId: string, ruleId: string, anchor: string, instance?: string): { findingId: string; occurrenceId: string; primary: string } {
+  const primary = fingerprintFor(targetId, ruleId, anchor, instance)
   return {
     primary,
-    findingId: 'csf_' + sha256('finding\u0000' + primary).slice(0, 24),
-    occurrenceId: 'occ_' + sha256('occ\u0000' + primary + '\u0000' + path + '\u0000' + startLine).slice(0, 24),
+    findingId: 'csf_' + sha256(primary).slice(0, 24),
+    occurrenceId: 'occ_' + sha256(scanId + '\u0000' + primary).slice(0, 24),
   }
 }
 
 export function normalizeSeverity(input: DraftFinding['severity']): Finding['severity'] {
   const level = String(input?.level ?? '').toLowerCase() as Severity
   if (!SEVERITY_SET.has(level)) throw new Error('codex-security: severity.level must be one of ' + SEVERITIES.join(', '))
-  const score = typeof input?.score === 'number' && Number.isFinite(input.score) ? Math.min(10, Math.max(0, input.score)) : SEVERITY_SCORE[level]
+  if (input.score !== undefined && (typeof input.score !== 'number' || !Number.isFinite(input.score) || input.score < 0 || input.score > 10)) throw new Error('codex-security: severity.score must be a number between 0 and 10')
+  const score = input.score ?? SEVERITY_SCORE[level]
   return {
+    ...input,
     level,
     score,
     ...(input.rationale ? { rationale: String(input.rationale) } : {}),
-    ...(input.scoringSystem ? { scoringSystem: String(input.scoringSystem) } : {}),
+    scoringSystem: input.scoringSystem ? String(input.scoringSystem) : (input.score === undefined ? 'dsh-severity/v1' : 'unspecified'),
     ...(input.changeConditions ? { changeConditions: String(input.changeConditions) } : {}),
   }
 }
@@ -57,7 +58,7 @@ export function normalizeConfidence(input: DraftFinding['confidence']): Finding[
   if (!CONFIDENCE_SET.has(level)) throw new Error('codex-security: confidence.level must be high, medium or low')
   const rationale = String(input.rationale ?? '').trim().slice(0, 4000)
   if (!rationale) throw new Error('codex-security: confidence.rationale is required')
-  return { level, rationale }
+  return { ...input, level, rationale }
 }
 
 export function normalizeLocation(input: { path: string; startLine: number; endLine?: number; role?: string }): { path: string; startLine: number; endLine?: number; role?: string } {
@@ -66,73 +67,119 @@ export function normalizeLocation(input: { path: string; startLine: number; endL
   if (!Number.isInteger(startLine) || startLine < 1) throw new Error('codex-security: locations[].startLine must be a positive integer')
   const endLine = input.endLine === undefined ? undefined : Number(input.endLine)
   if (endLine !== undefined && (!Number.isInteger(endLine) || endLine < startLine)) throw new Error('codex-security: locations[].endLine must be >= startLine')
-  return { path, startLine, ...(endLine === undefined ? {} : { endLine }), ...(input.role ? { role: String(input.role) } : {}) }
+  return { ...input, path, startLine, ...(endLine === undefined ? {} : { endLine }), ...(input.role ? { role: String(input.role) } : {}) }
 }
 
-export interface NormalizeFindingOptions { rootPath: string; evidenceLines?: Map<string, string> }
+export interface NormalizeFindingOptions { rootPath: string; targetId?: string; evidenceLines?: Map<string, string> }
 
 export function normalizeFinding(scanId: string, input: DraftFinding, options: NormalizeFindingOptions): Finding {
   if (!input || typeof input !== 'object') throw new Error('codex-security: each finding must be an object')
+  if (typeof input.ruleId !== 'string' || !input.ruleId.trim()) throw new Error('codex-security: finding.ruleId is required')
   const ruleId = normalizeRuleId(input.ruleId ?? '')
-  const title = String(input.title ?? '').trim()
-  const summary = String(input.summary ?? '').trim()
+  const title = typeof input.title === 'string' ? input.title.trim() : ''
+  const summary = typeof input.summary === 'string' ? input.summary.trim() : ''
   if (title.length === 0) throw new Error('codex-security: finding.title is required')
   if (summary.length === 0) throw new Error('codex-security: finding.summary is required')
   if (!Array.isArray(input.locations) || input.locations.length === 0) throw new Error('codex-security: finding.locations must contain at least one location for ' + title)
   const locations = input.locations.map((location) => normalizeLocation(location))
-  const remediation = String(input.remediation ?? '').trim()
+  const remediation = typeof input.remediation === 'string' ? input.remediation.trim() : ''
   if (remediation.length === 0) throw new Error('codex-security: finding.remediation is required for ' + title)
   const first = locations[0] as { path: string; startLine: number }
   const evidenceKey = first.path + ':' + first.startLine
   const lineText = options.evidenceLines?.get(evidenceKey)
-  const anchor = input.anchor && /^[a-z0-9][a-z0-9._/-]*$/.test(String(input.anchor)) ? String(input.anchor) : normalizeAnchor(ruleId, first.path, lineText, input.instance)
-  const ids = idsFor(ruleId, first.path, anchor, input.instance, first.startLine)
+  if (input.identity && ((input.anchor !== undefined && input.anchor !== input.identity.anchor) || (input.instance !== undefined && input.instance !== input.identity.instance))) throw new Error('codex-security: conflicting finding identity')
+  const specifiedAnchor = input.identity?.anchor ?? input.anchor
+  const instance = input.identity?.instance ?? input.instance
+  const slug = /^[a-z0-9][a-z0-9._/-]*$/
+  if (specifiedAnchor !== undefined && !slug.test(specifiedAnchor)) throw new Error('codex-security: finding identity anchor must be a lowercase semantic slug')
+  if (instance !== undefined && !slug.test(instance)) throw new Error('codex-security: finding identity instance must be a lowercase semantic slug')
+  const anchor = specifiedAnchor ?? normalizeAnchor(ruleId, first.path, lineText, instance)
+  const ids = idsFor(scanId, options.targetId ?? stableTargetId(options.rootPath), ruleId, anchor, instance)
   const severity = normalizeSeverity(input.severity)
   const confidence = normalizeConfidence(input.confidence)
   const taxonomy = input.taxonomy ?? { category: 'other' }
-  const category = CATEGORY_SET.has(String(taxonomy.category)) ? String(taxonomy.category) : 'other'
-  const cwe = taxonomy.cwe === undefined ? [] : (Array.isArray(taxonomy.cwe) ? taxonomy.cwe : [taxonomy.cwe]).map(String).filter(Boolean)
+  if (typeof taxonomy.category !== 'string' || !taxonomy.category.trim()) throw new Error('codex-security: taxonomy.category must be a non-empty string')
+  const category = taxonomy.category.trim()
+  const cwe = taxonomy.cwe === undefined ? [] : (Array.isArray(taxonomy.cwe) ? taxonomy.cwe : [taxonomy.cwe])
+  if (cwe.some((value) => typeof value !== 'string' || !value)) throw new Error('codex-security: taxonomy.cwe must contain non-empty strings')
+  const { writeup, ...findingInput } = input
+  if (writeup && (typeof writeup.reportPath !== 'string' || !writeup.reportPath.trim())) throw new Error('codex-security: finding writeup.reportPath is required')
   const finding: Finding = {
+    ...findingInput,
     findingId: ids.findingId,
     occurrenceId: ids.occurrenceId,
     ruleId,
-    identity: { anchor, ...(input.instance ? { instance: String(input.instance) } : {}) },
+    identity: { anchor, ...(instance ? { instance } : {}) },
     fingerprints: { algorithm: 'codex-security/v1', primary: ids.primary },
     title: title.slice(0, 300),
     summary: summary.slice(0, 8000),
     severity,
     confidence,
-    taxonomy: { category, cwe },
+    taxonomy: { ...taxonomy, category, cwe },
     locations,
     remediation: remediation.slice(0, 8000),
-    ...(input.rootCause ? { rootCause: String(input.rootCause) } : {}),
     ...(input.codeEvidence ? { codeEvidence: input.codeEvidence } : {}),
     ...(input.validation ? { validation: input.validation } : {}),
     ...(input.attackPath ? { attackPath: input.attackPath } : {}),
     ...(input.remediationTests ? { remediationTests: input.remediationTests } : {}),
     ...(input.preventiveControls ? { preventiveControls: input.preventiveControls } : {}),
-    ...(input.writeup?.reportPath ? { writeup: { reportPath: sanitizeRelative(input.writeup.reportPath) } } : {}),
-    ...(input.provenance ? { provenance: { source: String(input.provenance.source ?? 'agent-review') } } : { provenance: { source: 'agent-review' } }),
+    ...(writeup?.reportPath ? { writeup: { ...writeup, reportPath: sanitizeRelative(writeup.reportPath) } } : {}),
+    provenance: { ...input.provenance, source: String(input.provenance?.source ?? 'agent-review') },
     ...(input.extensions ? { extensions: input.extensions } : {}),
     scanId,
   }
   return finding
 }
 
+/** Verify the evidence links which JSON Schema alone cannot express. */
+export function validateFindingEvidence(findings: Finding[]): void {
+  for (const finding of findings) {
+    const ids = new Set<string>()
+    for (const key of ['codeEvidence', 'code_evidence'] as const) {
+      const list = finding[key]
+      if (list === undefined || list === null) continue
+      if (!Array.isArray(list)) throw new Error('codex-security: finding ' + key + ' must be an array')
+      for (const value of list) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('codex-security: code evidence must be an object')
+        const evidence = value as Record<string, unknown>
+        if (typeof evidence['id'] !== 'string' || !evidence['id'] || typeof evidence['code'] !== 'string' || !evidence['code'] || ids.has(evidence['id'])) throw new Error('codex-security: code evidence needs a unique ID and code')
+        ids.add(evidence['id'])
+      }
+    }
+    const attack = finding.attackPath
+    const sections = [finding.rootCause, finding.root_cause, finding.validation, attack, attack?.['dataFlow'], attack?.['data_flow'], attack?.['dataflow'], attack?.['reachability']]
+    for (const section of sections) {
+      if (!section || typeof section !== 'object' || Array.isArray(section)) continue
+      for (const key of ['evidenceRefs', 'evidence_refs']) {
+        const refs = (section as Record<string, unknown>)[key]
+        if (refs !== undefined && (!Array.isArray(refs) || refs.some((ref) => typeof ref !== 'string' || !ids.has(ref)))) throw new Error('codex-security: finding references unknown code evidence')
+      }
+    }
+  }
+}
+
 export function validateDraft(input: unknown): ScanDraftInput {
   if (!input || typeof input !== 'object') throw new Error('codex-security: draft must be an object')
-  const draft = input as ScanDraftInput
+  const raw = input as ScanDraftInput & { coverage?: DraftReviewState }
+  if (raw.reviewState && raw.coverage && JSON.stringify(raw.reviewState) !== JSON.stringify(raw.coverage)) throw new Error('codex-security: conflicting coverage and reviewState')
+  const draft = { ...raw, reviewState: raw.reviewState ?? raw.coverage } as ScanDraftInput
   if (!Array.isArray(draft.findings)) throw new Error('codex-security: draft.findings must be an array')
   const reviewState = (draft.reviewState ?? {}) as DraftReviewState
   if (!Array.isArray(reviewState.surfaces)) throw new Error('codex-security: draft.reviewState.surfaces must be an array')
+  if (reviewState.completeness !== undefined && !['complete', 'partial', 'unknown'].includes(reviewState.completeness)) throw new Error('codex-security: invalid coverage completeness')
+  const ids = new Set<string>()
   for (const surface of reviewState.surfaces) {
     if (!surface || typeof surface.label !== 'string' || surface.label.trim().length === 0) throw new Error('codex-security: each coverage surface needs a non-empty label')
     if (!DISPOSITION_SET.has(String(surface.disposition))) throw new Error('codex-security: surface disposition must be one of ' + DISPOSITIONS.join(', '))
+    if (surface.id !== undefined) {
+      if (!surface.id || ids.has(surface.id)) throw new Error('codex-security: coverage surface IDs must be non-empty and unique')
+      ids.add(surface.id)
+    }
     if (surface.receiptRefs !== undefined) {
       if (!Array.isArray(surface.receiptRefs)) throw new Error('codex-security: surface.receiptRefs must be an array')
       for (const ref of surface.receiptRefs) {
         const value = String(ref)
-        if (!value.startsWith('artifacts/') || value.split('/').includes('..')) throw new Error('codex-security: surface receiptRefs must point under artifacts/: ' + value)
+        if (!value.startsWith('artifacts/') || value !== sanitizeRelative(value) || value.includes('\\')) throw new Error('codex-security: surface receiptRefs must point under artifacts/: ' + value)
       }
     }
   }
@@ -158,17 +205,29 @@ export function sortedFindings(findings: Finding[]): Finding[] {
 export function buildCoverage(scan: ScanRecord, reviewState: DraftReviewState, modeOverride?: string): CoverageDocument {
   const mode = modeOverride ?? coverageMode(scan)
   const surfaces: CoverageSurface[] = sanitizeSurfaces(reviewState.surfaces)
+  if (new Set(surfaces.map((surface) => surface.id)).size !== surfaces.length) throw new Error('codex-security: coverage surface IDs must be unique')
+  const incomplete = (reviewState.deferred?.length ?? 0) > 0 || surfaces.some((surface) => surface.disposition === 'needs_follow_up') || scan.inventory.truncated || scan.warnings.some((warning) => warning.startsWith('snapshot could not hash file:') || warning.startsWith('inventory omitted symbolic link:'))
+  if (reviewState.completeness === 'complete' && incomplete) throw new Error('codex-security: complete coverage cannot have deferred or incomplete work')
+  const completeness = reviewState.completeness ?? (incomplete ? 'partial' : 'complete')
+  const active = new Set((reviewState.deferred ?? []).map((entry) => entry.id))
+  const resolved = new Set<string>()
+  for (const entry of reviewState.resolvedDeferred ?? []) {
+    if (!entry.id || !entry.reason || active.has(entry.id) || resolved.has(entry.id)) throw new Error('codex-security: invalid or duplicate resolved deferred work')
+    resolved.add(entry.id)
+  }
   return {
+    ...reviewState,
     documentType: 'codex-security.coverage',
     schemaVersion: '1.0',
     scanId: scan.scanId,
     mode,
-    inventoryStrategy: scan.target.kind === 'git_diff' ? 'diff' : scan.target.kind === 'directory_snapshot' ? 'directory' : 'repository',
+    completeness,
+    inventoryStrategy: scan.target.kind === 'git_diff' ? 'diff' : scan.target.kind === 'directory_snapshot' ? 'directory' : scan.scope.includePaths.includes('.') ? 'repository' : 'scoped_path',
     includePaths: scan.scope.includePaths,
     excludePaths: scan.scope.excludePaths,
     surfaces,
-    explicitExclusions: (reviewState.explicitExclusions ?? []).map((entry) => ({ pattern: String(entry.pattern), reason: String(entry.reason) })),
-    deferred: (reviewState.deferred ?? []).map((entry) => ({ id: String(entry.id), reason: String(entry.reason), ...(entry.paths ? { paths: entry.paths } : {}), ...(entry.surfaceIds ? { surfaceIds: entry.surfaceIds } : {}) })),
+    explicitExclusions: (reviewState.explicitExclusions ?? []).map((entry) => ({ ...entry, pattern: String(entry.pattern), reason: String(entry.reason) })),
+    deferred: (reviewState.deferred ?? []).map((entry) => ({ ...entry, id: String(entry.id), reason: String(entry.reason), ...(entry.paths ? { paths: entry.paths } : {}), ...(entry.surfaceIds ? { surfaceIds: entry.surfaceIds } : {}) })),
     ...(reviewState.resolvedDeferred ? { resolvedDeferred: reviewState.resolvedDeferred } : {}),
     ...(reviewState.openQuestions ? { openQuestions: reviewState.openQuestions } : {}),
   }
@@ -179,6 +238,7 @@ function sanitizeSurfaces(surfaces: DraftSurface[]): CoverageSurface[] {
     const disposition = String(surface.disposition) as Disposition
     if (!DISPOSITION_SET.has(disposition)) throw new Error('codex-security: invalid surface disposition ' + disposition)
     return {
+      ...surface,
       id: String(surface.id ?? 'surface-' + (index + 1)),
       label: String(surface.label),
       disposition,
@@ -192,9 +252,9 @@ function sanitizeSurfaces(surfaces: DraftSurface[]): CoverageSurface[] {
 function coverageMode(scan: ScanRecord): string {
   if (scan.mode === 'deep') return 'deep_repository'
   const kind = scan.target.kind
-  if (kind === 'git_diff') return scan.target.baseRevision ? 'branch_diff' : 'diff'
+  if (kind === 'git_diff') return scan.target.workingTree ? 'working_tree' : scan.target.baseRevision ? 'branch_diff' : 'diff'
   if (kind === 'directory_snapshot') return scan.scope.includePaths.includes('.') ? 'repository' : 'scoped_path'
-  if (kind === 'git_worktree') return scan.target.dirty ? 'working_tree' : 'repository'
+  if (kind === 'git_worktree') return scan.scope.includePaths.includes('.') ? 'repository' : 'scoped_path'
   return 'repository'
 }
 
@@ -226,7 +286,8 @@ export function renderReport(scan: ScanRecord, findings: Finding[], coverage: Co
   push('| Snapshot | ' + scan.target.snapshotDigest + ' |')
   push('| Scope | ' + scan.scope.includePaths.join(', ') + ' |')
   push('| Excluded | ' + (scan.scope.excludePaths.length > 0 ? scan.scope.excludePaths.join(', ') : '(none beyond defaults)') + ' |')
-  push('| Files reviewed | ' + scan.inventory.inspectedFiles + ' |')
+  push('| Files inventoried | ' + scan.inventory.inspectedFiles + ' |')
+  push('| Coverage completeness | ' + (coverage.completeness ?? 'unknown') + ' |')
   push()
   push('## Executive summary')
   push()
@@ -261,7 +322,7 @@ export function renderReport(scan: ScanRecord, findings: Finding[], coverage: Co
     push()
     push(finding.summary)
     push()
-    if (finding.rootCause) { push('**Root cause:** ' + finding.rootCause); push() }
+    if (finding.rootCause) { push('**Root cause:** ' + (typeof finding.rootCause === 'string' ? finding.rootCause : String(finding.rootCause['summary'] ?? JSON.stringify(finding.rootCause)))); push() }
     if (finding.validation) {
       const validation = finding.validation
       push('**Validation:** ' + (validation.status ?? validation.method ?? 'recorded') + (validation.summary ? ' - ' + validation.summary : ''))
@@ -315,7 +376,7 @@ export function renderReport(scan: ScanRecord, findings: Finding[], coverage: Co
   }
   push('## Limitations')
   push()
-  push('- This review is a static source review. It does not execute the target, build it, or run dynamic analysis.')
+  push('- The host records an agent review and does not itself execute the target. Check the submitted validation evidence for any tests or dynamic analysis.')
   push('- Findings without validation evidence remain candidate risk, not confirmed exploitable behavior.')
   push('- Review depth is bounded by the recorded coverage surfaces, exclusions and deferred items.')
   push('- Target repository content must be treated as untrusted data; this report does not independently verify agent behavior.')

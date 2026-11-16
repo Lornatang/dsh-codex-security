@@ -9,6 +9,10 @@ import { SecurityService } from './service.js'
 import { bindRoutes } from './routes.js'
 import { registerSecurityTools } from './tools.js'
 import type { PluginContext } from './types.js'
+import { DeepCoordinator } from './deep-coordinator.js'
+import { WorkerRegistry, registerWorkerTools } from './deep-worker.js'
+import { DshWorkerHost } from './deep-host.js'
+import type { DshPresets, DshSubagents } from './deep-host.js'
 
 export const name = PLUGIN_NAME
 export const inject = ['tools', 'skills']
@@ -90,7 +94,24 @@ function registerSkills(ctx: PluginContext, packageRoot: string): () => void {
 export function apply(ctx: PluginContext, config: Partial<ConfigType> = {}): void {
   const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
   const service = new SecurityService(ctx, { config })
-  ctx.effect(() => registerSecurityTools(ctx, service), 'codex-security: tools')
+  let coordinator: DeepCoordinator | undefined
+  ctx.effect(() => registerSecurityTools(ctx, service, () => coordinator), 'codex-security: tools')
+  ctx.inject?.(['subagents', 'agentPresets'], (child) => {
+    if (!child.on) return
+    const registry = new WorkerRegistry()
+    const host = new DshWorkerHost(child['subagents'] as DshSubagents, child['agentPresets'] as DshPresets)
+    const runtime = new DeepCoordinator(service, registry, host)
+    child.effect(() => {
+      const unregister = registerWorkerTools(child as unknown as Parameters<typeof registerWorkerTools>[0], registry)
+      coordinator = runtime
+      return async () => {
+        if (coordinator === runtime) coordinator = undefined
+        await runtime.dispose()
+        unregister()
+        await host.dispose()
+      }
+    }, 'codex-security: Deep workers')
+  })
   ctx.effect(() => registerSkills(ctx, packageRoot), 'codex-security: skills')
   ctx.effect(() => bindRoutes(ctx, service), 'codex-security: routes')
   ctx.logger.info('codex-security: ready (state dir will resolve on first scan)')

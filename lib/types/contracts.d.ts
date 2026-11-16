@@ -1,8 +1,8 @@
 import type { CoverageDocument, DraftFinding, DraftReviewState, Finding, FindingsDocument, ScanDraftInput, ScanRecord, Severity, FindingStatus } from './types.js';
 export declare function normalizeRuleId(value: string): string;
 export declare function normalizeAnchor(ruleId: string, path: string, lineText?: string, instance?: string): string;
-export declare function fingerprintFor(ruleId: string, path: string, anchor: string, instance?: string): string;
-export declare function idsFor(ruleId: string, path: string, anchor: string, instance?: string, startLine?: number): {
+export declare function fingerprintFor(targetId: string, ruleId: string, anchor: string, instance?: string): string;
+export declare function idsFor(scanId: string, targetId: string, ruleId: string, anchor: string, instance?: string): {
     findingId: string;
     occurrenceId: string;
     primary: string;
@@ -22,9 +22,12 @@ export declare function normalizeLocation(input: {
 };
 export interface NormalizeFindingOptions {
     rootPath: string;
+    targetId?: string;
     evidenceLines?: Map<string, string>;
 }
 export declare function normalizeFinding(scanId: string, input: DraftFinding, options: NormalizeFindingOptions): Finding;
+/** Verify the evidence links which JSON Schema alone cannot express. */
+export declare function validateFindingEvidence(findings: Finding[]): void;
 export declare function validateDraft(input: unknown): ScanDraftInput;
 export declare function buildFindingsDocument(scanId: string, findings: Finding[]): FindingsDocument;
 export declare function severityCounts(findings: Finding[]): Record<Severity, number>;

@@ -4,15 +4,18 @@ import type { Config } from './config.js'
 import type { Finding, ScanRecord, ScanStatus, ScanSummary, Severity, TriageEntry, FindingStatus } from './types.js'
 import { SEVERITIES } from './types.js'
 import { ensureDir, joinWithin, nowIso, readJson, readText, sanitizeRelative, writeFileAtomic, writeJsonAtomic, sha256 } from './util.js'
+import { acquireStateLock } from './state-lock.js'
 
 export interface ScanIndex { version: 1; scans: Record<string, ScanSummary & { repoKey: string }> }
 
 /** Files owned by the seal step; agents cannot overwrite them through save_artifact. */
-const SEALED_FILES = new Set(['scan.json', 'findings.json', 'coverage.json', 'scan-manifest.json', 'sarif.json', 'report.md', 'threat-model.md'])
+const SEALED_FILES = new Set(['scan.json', 'findings.json', 'coverage.json', 'scan-manifest.json', 'sarif.json', 'report.md', 'threat-model.md', 'threatmodel.md'])
 const INTERNAL_FILES = new Set([...SEALED_FILES, 'candidates.json', 'validations.json', 'attack-paths.json', 'review-items.json', 'triage.json'])
 
 export interface CreateScanInput {
   scanId: string
+  managedParent?: string
+  managedRootIdentity?: ScanRecord['managedRootIdentity']
   mode: ScanRecord['mode']
   promptOnly: boolean
   target: ScanRecord['target']
@@ -65,7 +68,6 @@ export function summarize(record: ScanRecord): ScanSummary {
 }
 
 export class ScanStore {
-  private indexCache: ScanIndex | undefined
   private queue: Promise<unknown> = Promise.resolve()
 
   constructor(public readonly stateDir: string) {}
@@ -81,17 +83,20 @@ export class ScanStore {
     await ensureDir(join(this.stateDir, 'repositories'))
   }
 
-  private serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const next = this.queue.then(operation, operation)
+  private serialize<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const guarded = async (): Promise<T> => {
+      signal?.throwIfAborted()
+      const release = await acquireStateLock(join(this.stateDir, '.locks', 'index.sqlite'), { signal })
+      try { signal?.throwIfAborted(); return await operation() } finally { release() }
+    }
+    const next = this.queue.then(guarded, guarded)
     this.queue = next.catch(() => undefined)
     return next
   }
 
   async loadIndex(): Promise<ScanIndex> {
-    if (this.indexCache) return this.indexCache
     const stored = await readJson<ScanIndex>(this.indexPath)
-    this.indexCache = stored && stored.version === 1 ? stored : await this.rebuildIndex()
-    return this.indexCache
+    return stored && stored.version === 1 ? stored : this.rebuildIndex()
   }
 
   private async rebuildIndex(): Promise<ScanIndex> {
@@ -110,15 +115,18 @@ export class ScanStore {
   }
 
   async saveIndex(index: ScanIndex): Promise<void> {
-    this.indexCache = index
     await writeJsonAtomic(this.indexPath, index)
   }
 
-  async create(input: CreateScanInput): Promise<ScanRecord> {
+  async create(input: CreateScanInput, options: { signal?: AbortSignal } = {}): Promise<ScanRecord> {
     return this.serialize(async () => {
+      options.signal?.throwIfAborted()
+      if (await this.get(input.scanId)) throw new Error('codex-security: scan already exists: ' + input.scanId)
       const timestamp = nowIso()
       const record: ScanRecord = {
         scanId: input.scanId,
+        ...(input.managedParent ? { managedParent: input.managedParent } : {}),
+        ...(input.managedRootIdentity ? { managedRootIdentity: input.managedRootIdentity } : {}),
         repoKey: repoKeyFor(input.target.rootPath),
         mode: input.mode,
         status: 'running',
@@ -139,6 +147,7 @@ export class ScanStore {
         severityCounts: emptySeverityCounts(),
         warnings: input.warnings,
       }
+      options.signal?.throwIfAborted()
       await this.writeRecord(record)
       const dir = this.scanDir(record)
       await ensureDir(join(dir, 'checkpoints'))
@@ -147,7 +156,7 @@ export class ScanStore {
       index.scans[record.scanId] = { ...summarize(record), repoKey: record.repoKey }
       await this.saveIndex(index)
       return record
-    })
+    }, options.signal)
   }
 
   private async writeRecord(record: ScanRecord): Promise<void> {
@@ -171,8 +180,6 @@ export class ScanStore {
       const dir = join(reposDir, repoKey, 'scans', scanId)
       const record = await readJson<ScanRecord>(join(dir, 'scan.json'))
       if (record) {
-        index.scans[scanId] = { ...summarize(record), repoKey }
-        await this.saveIndex(index)
         return { record, dir }
       }
     }
@@ -258,10 +265,14 @@ export class ScanStore {
           continue
         }
         if (!entry.isFile()) continue
+        if (/^\.\d+\.(?:\d+\.[a-f0-9]{8}|[a-f0-9]{24})\.tmp$/.test(entry.name)) continue
         if (relBase.length === 0 && SEALED_FILES.has(entry.name)) continue
         const { stat } = await import('node:fs/promises')
-        const info = await stat(join(dir, entry.name))
-        results.push({ path: rel, bytes: info.size })
+        const info = await stat(join(dir, entry.name)).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return undefined
+          throw error
+        })
+        if (info) results.push({ path: rel, bytes: info.size })
       }
     }
     await walk(found.dir, '')
