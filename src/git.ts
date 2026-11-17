@@ -46,6 +46,7 @@ export async function remoteUrl(root: string, signal?: AbortSignal): Promise<str
 }
 
 export async function resolveRevision(root: string, ref: string, signal?: AbortSignal): Promise<string | undefined> {
+  if (typeof ref !== 'string' || ref.length === 0 || ref.startsWith('-')) throw new Error('codex-security: invalid git revision: ' + ref)
   return gitString(root, ['rev-parse', '--verify', ref + '^{commit}'], undefined, signal)
 }
 

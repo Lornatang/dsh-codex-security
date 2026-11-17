@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { link, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { link, mkdir, open, readFile, readdir, realpath, rename, rm } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -30,9 +30,10 @@ export async function ensureDir(path: string): Promise<void> {
 
 export async function writeFileAtomic(path: string, data: string | Uint8Array): Promise<void> {
   await ensureDir(dirname(path))
-  const tmp = join(dirname(path), '.' + process.pid + '.' + Date.now() + '.' + randomBytes(4).toString('hex') + '.tmp')
+  const tmp = join(dirname(path), '.' + process.pid + '.' + randomBytes(12).toString('hex') + '.tmp')
+  const handle = await open(tmp, 'wx', 0o600)
   try {
-    await writeFile(tmp, data)
+    try { await handle.writeFile(data) } finally { await handle.close() }
     const deadline = Date.now() + 2000
     let pause = 10
     for (;;) {
@@ -96,13 +97,17 @@ export async function readJson<T>(path: string): Promise<T | undefined> {
 }
 
 export async function readText(path: string, limit = 1024 * 1024): Promise<string | undefined> {
+  let handle
   try {
-    const value = await readFile(path)
-    return value.subarray(0, limit).toString('utf8')
+    handle = await open(path, 'r')
+    const size = Math.max(0, Math.floor(limit))
+    const buffer = Buffer.alloc(size)
+    const { bytesRead } = await handle.read(buffer, 0, size, 0)
+    return buffer.subarray(0, bytesRead).toString('utf8')
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
-  }
+  } finally { await handle?.close().catch(() => undefined) }
 }
 
 export async function readFullText(path: string): Promise<string | undefined> {
@@ -160,18 +165,95 @@ export function globToRegExp(pattern: string): RegExp {
     else if ('\\^$+.()|{}[]'.includes(char)) out += '\\' + char
     else out += char
   }
+  // Collapse adjacent identical quantifiers so crafted globs cannot trigger catastrophic backtracking.
+  out = out.replace(/(?:\.\*){2,}/g, '.*').replace(/(?:\[\^\/\]\*){2,}/g, '[^/]*')
   const prefix = anchored ? '^' : '(?:^|.*/)'
   const re = new RegExp(prefix + out + '$')
   return negate ? new RegExp('^(?!' + re.source.replace(/^\^/, '') + ').*$') : re
+}
+
+type GlobToken = { kind: 'literal'; value: string } | { kind: 'star' } | { kind: 'globstar' } | { kind: 'qmark' }
+interface CompiledGlob { negate: boolean; anchored: boolean; tokens: GlobToken[] }
+
+const GLOB_CACHE = new Map<string, CompiledGlob | null>()
+const GLOB_CACHE_LIMIT = 4096
+const GLOB_MAX_LENGTH = 1024
+
+/** Compile a glob once into tokens; matching uses a linear-time DP that cannot backtrack exponentially. */
+function compileGlob(pattern: string): CompiledGlob | null {
+  const cached = GLOB_CACHE.get(pattern)
+  if (cached !== undefined || GLOB_CACHE.has(pattern)) return cached ?? null
+  let compiled: CompiledGlob | null = null
+  try {
+    let value = pattern.trim()
+    if (value.length > GLOB_MAX_LENGTH) throw new Error('glob pattern too long')
+    if (value.startsWith('./')) value = value.slice(2)
+    let negate = false
+    if (value.startsWith('!')) { negate = true; value = value.slice(1) }
+    if (value.endsWith('/')) value += '**'
+    const anchored = value.includes('/')
+    const tokens: GlobToken[] = []
+    let literal = ''
+    const flush = () => { if (literal) { tokens.push({ kind: 'literal', value: literal }); literal = '' } }
+    for (let i = 0; i < value.length; i++) {
+      const char = value[i] as string
+      if (char === '*') {
+        if (value[i + 1] === '*') {
+          flush(); tokens.push({ kind: 'globstar' })
+          i += 1
+          if (value[i + 1] === '/') i += 1
+        } else { flush(); tokens.push({ kind: 'star' }) }
+      } else if (char === '?') { flush(); tokens.push({ kind: 'qmark' }) }
+      else literal += char
+    }
+    flush()
+    compiled = { negate, anchored, tokens }
+  } catch { compiled = null }
+  if (GLOB_CACHE.size >= GLOB_CACHE_LIMIT) GLOB_CACHE.clear()
+  GLOB_CACHE.set(pattern, compiled)
+  return compiled
+}
+
+/** Full-match a token sequence against str in O(tokens x length) time (no catastrophic backtracking). */
+function globBodyMatch(tokens: readonly GlobToken[], str: string): boolean {
+  const n = str.length
+  let dp = new Uint8Array(n + 1)
+  dp[0] = 1
+  for (const token of tokens) {
+    const next = new Uint8Array(n + 1)
+    if (token.kind === 'literal') {
+      const lit = token.value
+      const len = lit.length
+      for (let j = 0; j + len <= n; j++) if (dp[j] && str.startsWith(lit, j)) next[j + len] = 1
+    } else if (token.kind === 'qmark') {
+      for (let j = 0; j < n; j++) if (dp[j] && str[j] !== '/') next[j + 1] = 1
+    } else if (token.kind === 'star') {
+      next[0] = dp[0] ?? 0
+      for (let j = 1; j <= n; j++) next[j] = (dp[j] ?? 0) || (str[j - 1] !== '/' && (next[j - 1] ?? 0) ? 1 : 0)
+    } else {
+      next[0] = dp[0] ?? 0
+      for (let j = 1; j <= n; j++) next[j] = (dp[j] ?? 0) || (next[j - 1] ?? 0)
+    }
+    dp = next
+  }
+  return dp[n] === 1
+}
+
+function globPositiveMatch(compiled: CompiledGlob, path: string): boolean {
+  if (compiled.anchored) return globBodyMatch(compiled.tokens, path)
+  if (globBodyMatch(compiled.tokens, path)) return true
+  for (let i = 0; i < path.length; i++) if (path[i] === '/' && globBodyMatch(compiled.tokens, path.slice(i + 1))) return true
+  return false
 }
 
 export function matchesAny(relPath: string, patterns: string[]): boolean {
   const path = relPath.split(sep).join('/')
   for (const pattern of patterns) {
     if (!pattern) continue
-    try {
-      if (globToRegExp(pattern).test(path)) return true
-    } catch { /* ignore malformed pattern */ }
+    const compiled = compileGlob(pattern)
+    if (!compiled) continue
+    const matched = globPositiveMatch(compiled, path)
+    if (compiled.negate ? !matched : matched) return true
   }
   return false
 }

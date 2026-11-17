@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.9] - 2026-11-17
+
+### Security
+
+- Contain evidence reads to the scan target: sanitize and validate finding location paths, rejecting traversal, absolute paths and symlink escapes before reading any host file.
+- Eliminate catastrophic backtracking (ReDoS) in scope glob matching by collapsing nested quantifiers and matching include/exclude globs with a cached linear-time matcher.
+
+### Fixed
+
+- Read at most the requested byte limit when loading artifacts instead of buffering entire files into memory.
+- Create atomic-write temporary files exclusively (`wx`) with 96-bit random suffixes.
+- Reject option-like Git revision arguments (leading `-`) before invoking `rev-parse`.
+
+### Performance
+
+- Compile scope globs once and cache them, removing per-file/per-pattern RegExp recompilation during inventory walks.
+
 ## [0.1.8] - 2026-11-16
 
 ### Added

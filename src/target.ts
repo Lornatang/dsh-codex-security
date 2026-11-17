@@ -2,7 +2,7 @@ import { lstat, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { InventoryInfo, ScopeInfo, TargetInfo, TargetKind } from './types.js'
-import { isProbablyBinary, languageOf, listFiles, matchesAny, matchesScopePath, normalizeLine, stableTargetId, truncate } from './util.js'
+import { isProbablyBinary, isWithin, languageOf, listFiles, matchesAny, matchesScopePath, normalizeLine, sanitizeRelative, stableTargetId, truncate } from './util.js'
 import { changedFiles, currentBranch, fileDigest, headRevision, remoteUrl, repoRoot, resolveRevision, statusEntries, trackedFiles } from './git.js'
 
 export interface ResolveTargetOptions {
@@ -193,9 +193,13 @@ export async function resolveDiff(rootPath: string, options: { diffTarget?: stri
 export async function readEvidenceLine(rootPath: string, path: string, line: number, maxBytes: number): Promise<string | undefined> {
   const { open } = await import('node:fs/promises')
   if (!Number.isFinite(line) || line < 1) return undefined
-  const absolute = resolve(rootPath, path)
   let handle
   try {
+    const absolute = resolve(rootPath, sanitizeRelative(path))
+    if (!isWithin(rootPath, absolute)) return undefined
+    const realRoot = await realpath(rootPath).catch(() => rootPath)
+    const real = await realpath(absolute).catch(() => undefined)
+    if (real && !isWithin(realRoot, real)) return undefined
     handle = await open(absolute, 'r')
     const buffer = Buffer.alloc(Math.min(maxBytes, 256 * 1024))
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
