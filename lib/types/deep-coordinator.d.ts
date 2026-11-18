@@ -42,6 +42,16 @@ export declare class DeepCoordinator {
     private lockPath;
     private transitionPath;
     private cancelPath;
+    private runSidecarDir;
+    private runSidecarPath;
+    private readonly sidecarHashes;
+    /** Heavy per-worker results that no longer belong in the transition journal. */
+    private runPayload;
+    /**
+     * Journal transitions are written frequently. Keep only light run metadata in
+     * the journal and offload each worker's findings/coverage/receipts to a
+     * per-worker sidecar, written only when its payload actually changed.
+     */
     private save;
     private read;
     private authorize;

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.12] - 2026-11-19
+
+- Read chunked evidence from the already verified worker text cache instead of re-reading and hashing the whole file per chunk.
+- Serve scan listings from a cached index invalidated by index.json metadata instead of rebuilding and locking on every read.
+- Read scan triage, findings and artifacts from the resolved scan directory in one pass instead of resolving the index repeatedly.
+- Offload Deep worker payloads to per-worker sidecar files so journal transitions no longer rewrite every worker findings on each save, and detect merge collisions with a set.
+- Group draft evidence reads by source file behind one bounded reader, and normalize tool results without a JSON round-trip.
+
 ## [0.1.11] - 2026-11-19
 
 - Remove the unused scan-draft JSON schema and the three reference links that pointed at it; draft validation is unchanged and still enforced by the host.

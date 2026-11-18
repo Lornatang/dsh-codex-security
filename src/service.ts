@@ -15,7 +15,7 @@ import type {
 } from './types.js'
 import { FINDING_STATUSES, SEVERITIES } from './types.js'
 import { ScanStore, defaultStateDir } from './store.js'
-import { readEvidenceLine, resolveTarget } from './target.js'
+import { readEvidenceLine, readEvidenceLines, resolveTarget } from './target.js'
 import { assertArtifactContract } from './schema.js'
 import { canonicalProspectivePath, ensureDir, isWithin, joinWithin, newId, normalizeLine, nowIso, readFullText, readJson, sanitizeRelative, sha256, truncate, writeFileAtomic, writeJsonAtomic } from './util.js'
 import { createExportValidator, writeSecureExport } from './secure-export.js'
@@ -570,16 +570,15 @@ export class SecurityService {
       if (!keys.has(key)) keys.set(key, { path, line: location.startLine })
       if (keys.size >= 500) break
     }
+    if (keys.size === 0) return new Map<string, string>()
+    // Group by source path first so a draft citing several lines of one file
+    // pays one hardened read instead of one per line.
+    const requests = Array.from(keys.values())
+    const lines = await readEvidenceLines(record.target.rootPath, requests, this.config.maxFileBytes)
     const evidence = new Map<string, string>()
-    const entries = Array.from(keys.entries())
-    const concurrency = 16
-    for (let index = 0; index < entries.length; index += concurrency) {
-      const batch = entries.slice(index, index + concurrency)
-      const lines = await Promise.all(batch.map(async ([key, value]) => {
-        const line = await readEvidenceLine(record.target.rootPath, value.path, value.line, this.config.maxFileBytes)
-        return { key, line }
-      }))
-      for (const entry of lines) if (entry.line !== undefined) evidence.set(entry.key, entry.line)
+    for (const [key, value] of keys) {
+      const line = lines.get(value.path + ':' + value.line)
+      if (line !== undefined) evidence.set(key, line)
     }
     return evidence
   }
@@ -587,31 +586,29 @@ export class SecurityService {
   private async collectBoundEvidenceLines(snapshot: WorkerSnapshot, findings: DraftFinding[]): Promise<Map<string, string>> {
     const registry = new WorkerRegistry()
     registry.reserve('verified-draft', snapshot)
-    const files = new Map<string, string>()
+    const files = new Map<string, string[]>()
     const evidence = new Map<string, string>()
-    const read = async (path: string): Promise<string> => {
-      let content = files.get(path)
-      if (content === undefined) { content = await registry.read('verified-draft', path); files.set(path, content) }
-      return content
+    const read = async (path: string): Promise<string[]> => {
+      let lines = files.get(path)
+      if (lines === undefined) { lines = (await registry.read('verified-draft', path)).split('\n'); files.set(path, lines) }
+      return lines
     }
     try {
       for (const finding of findings) {
         if (!Array.isArray(finding.locations)) throw new Error('codex-security: finding locations are required')
         for (const location of finding.locations) {
-          const content = await read(location.path)
-          const lines = content.split('\n')
+          const lines = await read(location.path)
           if (!Number.isInteger(location.startLine) || location.startLine < 1 || location.startLine > lines.length || (location.endLine !== undefined && location.endLine > lines.length)) throw new Error('codex-security: finding location is outside the bound source')
           evidence.set(location.path + ':' + location.startLine, truncate(normalizeLine(lines[location.startLine - 1] ?? ''), 400))
         }
         for (const raw of [...(finding.codeEvidence ?? []), ...(finding.code_evidence ?? [])]) {
           const item = asObject(raw)
           if (!item || typeof item['path'] !== 'string' || typeof item['code'] !== 'string' || !item['code']) throw new Error('codex-security: worker code evidence requires a bound source path and code')
-          const content = await read(item['path'])
+          const lines = await read(item['path'])
           const start = item['startLine'] ?? item['start_line']
           const end = item['endLine'] ?? item['end_line'] ?? start
-          let excerpt = content
+          let excerpt = lines.join('\n')
           if (start !== undefined) {
-            const lines = content.split('\n')
             if (typeof start !== 'number' || typeof end !== 'number' || !Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start || end > lines.length) throw new Error('codex-security: code evidence location is outside the bound source')
             excerpt = lines.slice(start - 1, end).join('\n')
           }
@@ -1090,11 +1087,17 @@ export class SecurityService {
   async getScan(args: Json): Promise<Json> {
     const scanId = requiredStr(args, 'scanId')
     const { record, dir } = await this.requireScan(scanId)
-    const findings = await this.findingsWithStatus(scanId)
+    // Read the scan files that all belong to this one response from the resolved
+    // directory instead of re-resolving the index (and re-reading scan.json)
+    // through the store once per document.
+    const triage = (await readJson<Record<string, TriageEntry>>(join(dir, 'triage.json'))) ?? {}
+    const findings = ((await readJson<{ findings?: Finding[] }>(join(dir, 'findings.json')))?.findings ?? []).map((finding) => {
+      const entry = triage[finding.findingId]
+      return { ...finding, status: entry?.status ?? 'open', ...(entry ? { triage: entry } : {}) }
+    })
     const coverage = await readJson<CoverageDocument>(join(dir, 'coverage.json'))
     const manifest = await readJson<Json>(join(dir, 'scan-manifest.json'))
-    const artifacts = await this.store.listArtifacts(scanId)
-    const triage = await this.store.readTriage(scanId)
+    const artifacts = await this.store.listArtifacts(scanId, dir)
     const reviewItems = (await readJson<ReviewItemsDocument>(join(dir, 'review-items.json')))?.items ?? []
     return {
       ok: true,

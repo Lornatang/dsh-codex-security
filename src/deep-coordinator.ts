@@ -9,7 +9,7 @@ import { acquireStateLock } from './state-lock.js'
 import { resolveTarget } from './target.js'
 import { sourceRootIdentity } from './secure-read.js'
 import type { CoverageDocument, DeepBudget, DraftFinding, DraftReviewState, Finding, ScanRecord } from './types.js'
-import { newId, nowIso, readJson, sha256, writeJsonAtomic } from './util.js'
+import { ensureDir, newId, nowIso, readJson, sha256, writeJsonAtomic } from './util.js'
 
 type Json = Record<string, unknown>
 export interface DeepActor { agent: { id: string }; signal?: AbortSignal }
@@ -108,11 +108,61 @@ export class DeepCoordinator {
   private lockPath(scanId: string): string { return join(this.service.store.stateDir, '.locks', 'deep-' + scanId + '.sqlite') }
   private transitionPath(scanId: string): string { return join(this.service.store.stateDir, '.locks', 'deep-transition-' + scanId + '.sqlite') }
   private cancelPath(scanId: string): string { return join(this.service.store.stateDir, 'deep', scanId + '.cancel.json') }
-  private async save(journal: DeepJournal): Promise<void> { await writeJsonAtomic(this.journalPath(journal.scanId), journal) }
+  private runSidecarDir(scanId: string): string { return join(this.service.store.stateDir, 'deep', scanId + '.runs') }
+  private runSidecarPath(scanId: string, childId: string): string { return join(this.runSidecarDir(scanId), childId + '.json') }
+  private readonly sidecarHashes = new Map<string, string>()
+
+  /** Heavy per-worker results that no longer belong in the transition journal. */
+  private runPayload(run: DeepRun): Json {
+    const payload: Json = {}
+    if (run.draft !== undefined) payload['draft'] = run.draft as Json
+    if (run.receipts !== undefined) payload['receipts'] = run.receipts as unknown as Json
+    if (run.findings !== undefined) payload['findings'] = run.findings as unknown as Json
+    if (run.coverage !== undefined) payload['coverage'] = run.coverage as unknown as Json
+    if (run.reviewState !== undefined) payload['reviewState'] = run.reviewState as unknown as Json
+    return payload
+  }
+
+  /**
+   * Journal transitions are written frequently. Keep only light run metadata in
+   * the journal and offload each worker's findings/coverage/receipts to a
+   * per-worker sidecar, written only when its payload actually changed.
+   */
+  private async save(journal: DeepJournal): Promise<void> {
+    if (journal.runs.some((run) => Object.keys(this.runPayload(run)).length > 0)) await ensureDir(this.runSidecarDir(journal.scanId))
+    for (const run of journal.runs) {
+      if (!/^dcs_[a-f0-9]{24}$/.test(run.childId)) throw new Error('codex-security: invalid Deep worker id')
+      const payload = this.runPayload(run)
+      if (Object.keys(payload).length === 0) continue
+      const text = JSON.stringify(payload)
+      const digest = sha256(text)
+      const cacheKey = journal.scanId + '\u0000' + run.childId
+      if (this.sidecarHashes.get(cacheKey) === digest) continue
+      await writeJsonAtomic(this.runSidecarPath(journal.scanId, run.childId), payload)
+      this.sidecarHashes.set(cacheKey, digest)
+    }
+    const light: DeepJournal = { ...journal, runs: journal.runs.map((run) => ({
+      number: run.number, childId: run.childId, scanId: run.scanId, state: run.state,
+      ...(run.complete !== undefined ? { complete: run.complete } : {}),
+      ...(run.error ? { error: run.error } : {}),
+      ...(run.newCount !== undefined ? { newCount: run.newCount } : {}),
+    })) }
+    await writeJsonAtomic(this.journalPath(journal.scanId), light)
+  }
+
   private async read(scanId: string): Promise<DeepJournal> {
     if (!/^cs_[a-f0-9]{24}$/.test(scanId)) throw new Error('codex-security: invalid Deep scan id')
     const journal = await readJson<DeepJournal>(this.journalPath(scanId))
     if (!journal || journal.version !== 1 || journal.scanId !== scanId) throw new Error('codex-security: Deep scan journal not found')
+    for (const run of journal.runs) {
+      if (!run || !/^dcs_[a-f0-9]{24}$/.test(run.childId)) continue
+      if (run.draft !== undefined && run.receipts !== undefined && run.findings !== undefined) continue
+      const payload = await readJson<Json>(this.runSidecarPath(scanId, run.childId)).catch(() => undefined)
+      if (!payload || typeof payload !== 'object') continue
+      for (const key of ['draft', 'receipts', 'findings', 'coverage', 'reviewState'] as const) {
+        if (run[key] === undefined && payload[key] !== undefined) (run as unknown as Json)[key] = payload[key]
+      }
+    }
     return journal
   }
   private authorize(journal: DeepJournal, actor: DeepActor, claim?: unknown): void {
@@ -400,6 +450,7 @@ export class DeepCoordinator {
 
   private merge(journal: DeepJournal): { findings: DraftFinding[]; collisions: number } {
     const merged = new Map<string, { finding: Finding; signature: string; runs: number[] }>()
+    const fingerprints = new Set<string>()
     let collisions = 0
     for (const run of journal.runs) {
       if (run.state !== 'processed' || !run.findings) continue
@@ -411,7 +462,10 @@ export class DeepCoordinator {
         const key = fingerprint + '\u0000' + signature
         const prior = merged.get(key)
         if (prior) { prior.runs.push(run.number); continue }
-        if ([...merged.keys()].some((entry) => entry.startsWith(fingerprint + '\u0000'))) collisions++
+        // A previous key with the same fingerprint but a different semantic
+        // signature means the workers disagreed about one identity.
+        if (fingerprints.has(fingerprint)) collisions++
+        fingerprints.add(fingerprint)
         merged.set(key, { finding, signature, runs: [run.number] })
         newCount++
       }

@@ -1,4 +1,4 @@
-import { readdir } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { Finding, ScanRecord, ScanSummary, Severity, TriageEntry } from './types.js'
 import { ensureDir, joinWithin, nowIso, readJson, readText, sanitizeRelative, writeFileAtomic, writeJsonAtomic, sha256 } from './util.js'
@@ -81,6 +81,8 @@ export function summarize(record: ScanRecord): ScanSummary {
 
 export class ScanStore {
   private queue: Promise<unknown> = Promise.resolve()
+  private indexCache?: ScanIndex
+  private indexStamp?: string
 
   constructor(public readonly stateDir: string) {}
 
@@ -106,9 +108,29 @@ export class ScanStore {
     return next
   }
 
+  /** Cheap identity of index.json so a changed on-disk index invalidates the cache. */
+  private async indexFileStamp(): Promise<string | undefined> {
+    const info = await stat(this.indexPath).catch(() => undefined)
+    return info ? info.mtimeMs + ':' + info.size + ':' + info.ino : undefined
+  }
+
   async loadIndex(): Promise<ScanIndex> {
-    const stored = await readJson<ScanIndex>(this.indexPath)
-    return stored && stored.version === 1 ? stored : this.rebuildIndex()
+    const stamp = await this.indexFileStamp()
+    if (stamp !== undefined) {
+      if (this.indexCache && this.indexStamp === stamp) return this.indexCache
+      const stored = await readJson<ScanIndex>(this.indexPath)
+      if (stored && stored.version === 1) {
+        this.indexCache = stored
+        this.indexStamp = stamp
+        return stored
+      }
+    } else if (this.indexCache && this.indexStamp === undefined) {
+      return this.indexCache
+    }
+    const rebuilt = await this.rebuildIndex()
+    this.indexCache = rebuilt
+    this.indexStamp = undefined
+    return rebuilt
   }
 
   private async rebuildIndex(): Promise<ScanIndex> {
@@ -128,6 +150,8 @@ export class ScanStore {
 
   async saveIndex(index: ScanIndex): Promise<void> {
     await writeJsonAtomic(this.indexPath, index)
+    this.indexCache = index
+    this.indexStamp = await this.indexFileStamp()
   }
 
   async create(input: CreateScanInput, options: { signal?: AbortSignal } = {}): Promise<ScanRecord> {
@@ -229,11 +253,10 @@ export class ScanStore {
   }
 
   async list(): Promise<ScanSummary[]> {
-    return this.serialize(async () => {
-      const index = await this.rebuildIndex()
-      await this.saveIndex(index)
-      return Object.values(index.scans).sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-    })
+    // Read-only fast path: list never mutates scan state and must not serialize behind
+    // the index lock. The cached index is reused until index.json changes on disk.
+    const index = await this.loadIndex()
+    return Object.values(index.scans).sort((left, right) => right.createdAt.localeCompare(left.createdAt))
   }
 
   async saveArtifact(scanId: string, relativePath: string, content: string, mediaType: string): Promise<{ path: string; bytes: number; sha256: string; mediaType: string }> {
@@ -258,14 +281,13 @@ export class ScanStore {
     const target = joinWithin(found.dir, clean)
     const content = await readText(target, limit)
     if (content === undefined) throw new Error('codex-security: artifact not found: ' + relativePath)
-    const { stat } = await import('node:fs/promises')
     const info = await stat(target)
     return { path: clean, content, bytes: info.size, truncated: info.size > limit }
   }
 
-  async listArtifacts(scanId: string): Promise<{ path: string; bytes: number }[]> {
-    const found = await this.get(scanId)
-    if (!found) return []
+  async listArtifacts(scanId: string, knownDir?: string): Promise<{ path: string; bytes: number }[]> {
+    const scanDir = knownDir ?? (await this.get(scanId))?.dir
+    if (!scanDir) return []
     const results: { path: string; bytes: number }[] = []
     const walk = async (dir: string, relBase: string): Promise<void> => {
       let entries
@@ -280,7 +302,6 @@ export class ScanStore {
         if (!entry.isFile()) continue
         if (/^\.\d+\.(?:\d+\.[a-f0-9]{8}|[a-f0-9]{24})\.tmp$/.test(entry.name)) continue
         if (relBase.length === 0 && SEALED_FILES.has(guardName(entry.name))) continue
-        const { stat } = await import('node:fs/promises')
         const info = await stat(join(dir, entry.name)).catch((error: NodeJS.ErrnoException) => {
           if (error.code === 'ENOENT') return undefined
           throw error
@@ -288,7 +309,7 @@ export class ScanStore {
         if (info) results.push({ path: rel, bytes: info.size })
       }
     }
-    await walk(found.dir, '')
+    await walk(scanDir, '')
     return results.sort((left, right) => left.path.localeCompare(right.path))
   }
 

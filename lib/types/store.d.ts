@@ -27,11 +27,15 @@ export declare function summarize(record: ScanRecord): ScanSummary;
 export declare class ScanStore {
     readonly stateDir: string;
     private queue;
+    private indexCache?;
+    private indexStamp?;
     constructor(stateDir: string);
     private get indexPath();
     scanDir(record: Pick<ScanRecord, 'repoKey' | 'scanId'>): string;
     init(): Promise<void>;
     private serialize;
+    /** Cheap identity of index.json so a changed on-disk index invalidates the cache. */
+    private indexFileStamp;
     loadIndex(): Promise<ScanIndex>;
     private rebuildIndex;
     saveIndex(index: ScanIndex): Promise<void>;
@@ -59,7 +63,7 @@ export declare class ScanStore {
         bytes: number;
         truncated: boolean;
     }>;
-    listArtifacts(scanId: string): Promise<{
+    listArtifacts(scanId: string, knownDir?: string): Promise<{
         path: string;
         bytes: number;
     }[]>;

@@ -173,7 +173,10 @@ export class WorkerRegistry {
 
   async readChunk(childId: string, path: string, offset: number): Promise<{ path: string; content: string; offset: number; nextOffset: number | null; totalLength: number }> {
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('codex-security: invalid worker source offset')
-    const content = this.readText(childId, path)
+    // Chunks after the first were re-opening and re-hashing the whole file. The
+    // cache only ever holds bytes verified against the bound snapshot hash, so
+    // serving them cannot smuggle unverified content to the worker.
+    const content = this.cachedText(childId, path)
     if (offset > content.length) throw new Error('codex-security: worker source offset exceeds file length')
     const end = Math.min(offset + 4096, content.length)
     return { path, content: content.slice(offset, end), offset, nextOffset: end === content.length ? null : end, totalLength: content.length }

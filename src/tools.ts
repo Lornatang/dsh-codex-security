@@ -22,6 +22,45 @@ function render(_args: unknown, value: unknown): ToolResultBlock[] {
   return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
 }
 
+/**
+ * DSH rejects values containing undefined even though JSON.stringify drops them.
+ * A full JSON round-trip on every tool result allocates a second copy of large
+ * responses; walk the value instead and keep it when nothing needs normalizing.
+ */
+function normalizeToolResult(value: unknown): unknown {
+  return normalizeValue(value, new Set<object>())
+}
+
+function normalizeValue(value: unknown, seen: Set<object>): unknown {
+  if (value === undefined || typeof value === 'function' || typeof value === 'symbol') return undefined
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value !== 'object' || value === null) return value
+  if (seen.has(value)) throw new TypeError('codex-security: tool result contains a circular structure')
+  if (Array.isArray(value)) {
+    seen.add(value)
+    let changed = false
+    const normalized = value.map((item) => {
+      const next = normalizeValue(item, seen)
+      const result = next === undefined ? null : next
+      if (result !== item) changed = true
+      return result
+    })
+    seen.delete(value)
+    return changed ? normalized : value
+  }
+  seen.add(value)
+  let changed = false
+  const normalized: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    const next = normalizeValue(item, seen)
+    if (next === undefined) { changed = true; continue }
+    if (next !== item) changed = true
+    normalized[key] = next
+  }
+  seen.delete(value)
+  return changed ? normalized : value
+}
+
 function tool(
   name: string,
   description: string,
@@ -40,7 +79,7 @@ function tool(
     timeoutMs,
     // DSH rejects values containing undefined even though JSON.stringify drops them.
     // Normalize the whole response, including nested optional fields, at the boundary.
-    execute: async (args, exec) => { validate(args); return JSON.parse(JSON.stringify(await run(args, exec))) as unknown },
+    execute: async (args, exec) => { validate(args); return normalizeToolResult(await run(args, exec)) },
   }
 }
 

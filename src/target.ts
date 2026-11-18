@@ -191,9 +191,47 @@ export async function resolveDiff(rootPath: string, options: { diffTarget?: stri
 
 /** Read one source line for anchor derivation without trusting it as instructions. */
 export async function readEvidenceLine(rootPath: string, path: string, line: number, maxBytes: number): Promise<string | undefined> {
+  if (!Number.isFinite(line) || line < 1) return undefined
+  const lines = await readEvidenceFileLines(rootPath, path, maxBytes)
+  if (!lines) return undefined
+  const value = lines[Math.trunc(line) - 1]
+  return value === undefined ? undefined : truncate(normalizeLine(value), 400)
+}
+
+/**
+ * Read many evidence lines with one hardened open per source file. The old
+ * per-line reader repeated the lstat/open/realpath verification and re-read the
+ * file prefix for every requested line, so a draft citing several lines of one
+ * file paid that cost repeatedly.
+ */
+export async function readEvidenceLines(rootPath: string, requests: { path: string; line: number }[], maxBytes: number): Promise<Map<string, string>> {
+  const byPath = new Map<string, number[]>()
+  for (const request of requests) {
+    if (!Number.isFinite(request.line) || request.line < 1) continue
+    const line = Math.trunc(request.line)
+    const bucket = byPath.get(request.path)
+    if (bucket) { if (!bucket.includes(line)) bucket.push(line) } else byPath.set(request.path, [line])
+  }
+  const result = new Map<string, string>()
+  const groups = [...byPath.entries()]
+  const concurrency = 8
+  for (let index = 0; index < groups.length; index += concurrency) {
+    await Promise.all(groups.slice(index, index + concurrency).map(async ([path, lineNumbers]) => {
+      const lines = await readEvidenceFileLines(rootPath, path, maxBytes)
+      if (!lines) return
+      for (const line of lineNumbers) {
+        const value = lines[line - 1]
+        if (value !== undefined) result.set(path + ':' + line, truncate(normalizeLine(value), 400))
+      }
+    }))
+  }
+  return result
+}
+
+/** Hardened single-file read shared by the line readers. */
+async function readEvidenceFileLines(rootPath: string, path: string, maxBytes: number): Promise<string[] | undefined> {
   const { open } = await import('node:fs/promises')
   const { constants } = await import('node:fs')
-  if (!Number.isFinite(line) || line < 1) return undefined
   if (typeof path !== 'string' || path.length === 0) return undefined
   let absolute: string
   try { absolute = joinWithin(rootPath, path) } catch { return undefined }
@@ -217,9 +255,6 @@ export async function readEvidenceLine(rootPath: string, path: string, line: num
     if (!current || !current.isFile() || current.dev !== opened.dev || current.ino !== opened.ino || current.size !== opened.size) return undefined
     const buffer = Buffer.alloc(Math.min(maxBytes, 256 * 1024))
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
-    const text = buffer.subarray(0, bytesRead).toString('utf8')
-    const lines = text.split('\n')
-    const value = lines[line - 1]
-    return value === undefined ? undefined : truncate(normalizeLine(value), 400)
+    return buffer.subarray(0, bytesRead).toString('utf8').split('\n')
   } catch { return undefined } finally { await handle?.close().catch(() => undefined) }
 }
