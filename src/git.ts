@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { join } from 'node:path'
 
 const run = promisify(execFile)
 const MAX_BUFFER = 64 * 1024 * 1024
@@ -25,9 +24,6 @@ export async function gitString(root: string, args: string[], timeoutMs?: number
   return result.ok ? result.stdout.trim() : undefined
 }
 
-export async function isGitRepo(root: string): Promise<boolean> {
-  return (await gitString(root, ['rev-parse', '--is-inside-work-tree'])) === 'true'
-}
 
 export async function repoRoot(path: string, signal?: AbortSignal): Promise<string | undefined> {
   return gitString(path, ['rev-parse', '--show-toplevel'], undefined, signal)
@@ -117,23 +113,6 @@ export async function changedFiles(root: string, options: { base?: string; stage
     }
   }
   return files
-}
-
-/** Digest of the working tree diff including untracked files, used for snapshot identity. */
-export async function worktreeDigest(root: string): Promise<string> {
-  const hash = createHash('sha256')
-  const status = await git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
-  hash.update('status\u0000' + (status.ok ? status.stdout : ''))
-  const diff = await git(root, ['diff', 'HEAD'])
-  hash.update('diff\u0000' + (diff.ok ? diff.stdout : diff.stderr))
-  const staged = await git(root, ['diff', '--cached'])
-  hash.update('staged\u0000' + (staged.ok ? staged.stdout : ''))
-  const untracked = await git(root, ['ls-files', '--others', '--exclude-standard', '-z'])
-  if (untracked.ok) {
-    const names = untracked.stdout.split('\u0000').filter(Boolean).sort()
-    for (const name of names) hash.update('untracked\u0000' + name + '\u0000' + (await fileDigest(join(root, name)) ?? 'unavailable'))
-  }
-  return hash.digest('hex')
 }
 
 export async function fileDigest(path: string, signal?: AbortSignal): Promise<string | undefined> {

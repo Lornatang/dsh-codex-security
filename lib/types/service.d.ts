@@ -12,7 +12,6 @@ export interface SecurityServiceOptions {
 export declare class SecurityService {
     readonly store: ScanStore;
     readonly config: Config;
-    private readonly ctx;
     private readonly scanLocks;
     private readonly managedInvocations;
     constructor(ctx: PluginContext, options?: SecurityServiceOptions);

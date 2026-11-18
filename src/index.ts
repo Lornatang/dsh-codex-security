@@ -18,7 +18,6 @@ export const name = PLUGIN_NAME
 export const inject = ['tools', 'skills']
 export { Config }
 export const version = VERSION
-export const packageName = PACKAGE_NAME
 export { SecurityService }
 export type { ConfigType }
 

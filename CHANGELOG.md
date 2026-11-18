@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.11] - 2026-11-19
+
+- Remove the unused scan-draft JSON schema and the three reference links that pointed at it; draft validation is unchanged and still enforced by the host.
+- Delete dead helpers, imports and fields across the target reader, git helpers, constants, routes, service and store modules.
+- Stop exporting symbols that nothing outside their module consumes.
+
 ## [0.1.10] - 2026-11-18
 
 ### Security

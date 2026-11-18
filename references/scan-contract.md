@@ -183,7 +183,7 @@ These fields are optional for compatibility with existing v1 canonical artifacts
 
 ## Schemas
 
-New completed findings must match the [scan draft schema](../schemas/tools/scan-draft.schema.json). Finalization rejects legacy field aliases, malformed optional details, and invalid semantic slugs instead of repairing them. Historical sealed reports are validated through an in-memory compatibility adapter; their saved bytes remain unchanged. Stopped-scan recovery still salvages saved evidence.
+New completed findings must match the [findings schema](../schemas/findings.schema.json). Finalization rejects legacy field aliases, malformed optional details, and invalid semantic slugs instead of repairing them. Historical sealed reports are validated through an in-memory compatibility adapter; their saved bytes remain unchanged. Stopped-scan recovery still salvages saved evidence.
 
 - [Scan manifest schema](../schemas/scan-manifest.schema.json)
 - [Findings schema](../schemas/findings.schema.json)

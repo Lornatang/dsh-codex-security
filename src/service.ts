@@ -1,4 +1,4 @@
-import { lstat, readFile, rm } from 'node:fs/promises'
+import { lstat, readFile } from 'node:fs/promises'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { DEFAULT_CONFIG } from './config.js'
 import type { Config } from './config.js'
@@ -11,7 +11,7 @@ import { gitString } from './git.js'
 import type { PluginContext } from './types.js'
 import type {
   Candidate, CandidateAttackPath, CandidateValidation, CoverageDocument, DraftFinding, DraftReviewState,
-  Finding, FindingStatus, ReviewItem, ScanDraftInput, ScanMode, ScanRecord, ScanStatus, Severity, TriageEntry,
+  Finding, FindingStatus, ReviewItem, ScanDraftInput, ScanMode, ScanRecord, Severity, TriageEntry,
 } from './types.js'
 import { FINDING_STATUSES, SEVERITIES } from './types.js'
 import { ScanStore, defaultStateDir } from './store.js'
@@ -128,12 +128,10 @@ export interface SecurityServiceOptions {
 export class SecurityService {
   readonly store: ScanStore
   readonly config: Config
-  private readonly ctx: PluginContext
   private readonly scanLocks = new Map<string, Promise<void>>()
   private readonly managedInvocations = new WeakSet<object>()
 
   constructor(ctx: PluginContext, options: SecurityServiceOptions = {}) {
-    this.ctx = ctx
     this.config = { ...DEFAULT_CONFIG, ...(options.config ?? {}) }
     const profile = (ctx.get?.('profileContext') as { patchPath?: string } | undefined) ?? (Object.hasOwn(ctx, 'profileContext') ? ctx.profileContext : undefined)
     const patchPath = options.patchPath ?? profile?.patchPath

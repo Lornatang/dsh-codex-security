@@ -1,8 +1,6 @@
 import { readdir } from 'node:fs/promises'
-import { basename, dirname, join } from 'node:path'
-import type { Config } from './config.js'
-import type { Finding, ScanRecord, ScanStatus, ScanSummary, Severity, TriageEntry, FindingStatus } from './types.js'
-import { SEVERITIES } from './types.js'
+import { dirname, join } from 'node:path'
+import type { Finding, ScanRecord, ScanSummary, Severity, TriageEntry } from './types.js'
 import { ensureDir, joinWithin, nowIso, readJson, readText, sanitizeRelative, writeFileAtomic, writeJsonAtomic, sha256 } from './util.js'
 import { acquireStateLock } from './state-lock.js'
 

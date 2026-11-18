@@ -2,7 +2,7 @@ import { lstat, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { InventoryInfo, ScopeInfo, TargetInfo, TargetKind } from './types.js'
-import { isProbablyBinary, isWithin, joinWithin, languageOf, listFiles, matchesAny, matchesScopePath, normalizeLine, sanitizeRelative, stableTargetId, truncate } from './util.js'
+import { isProbablyBinary, isWithin, joinWithin, languageOf, listFiles, matchesAny, matchesScopePath, normalizeLine, stableTargetId, truncate } from './util.js'
 import { changedFiles, currentBranch, fileDigest, headRevision, remoteUrl, repoRoot, resolveRevision, statusEntries, trackedFiles } from './git.js'
 
 export interface ResolveTargetOptions {

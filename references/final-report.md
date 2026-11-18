@@ -17,7 +17,7 @@ Completion validates existing artifacts; it does not perform missing phases or c
 
 ## Finding Semantics
 
-Use `schemas/tools/scan-draft.schema.json` for new drafts and `finding-detail-fields.md` for rich fields. Supply:
+Use `finding-detail-fields.md` for rich fields. Supply:
 
 - An evidence-supported lowercase vulnerability-family `ruleId`, `taxonomy.category`, known `taxonomy.cwe` values (or `[]`), and genuine `provenance.source`. Use `local_plugin` only for findings this plugin discovered; preserve worker/source provenance and candidate identity.
 - Verified source locations, including the broken control or sink and materially affected entry points or concrete implementations. Preserve independently vulnerable instances. Group observations only when they share the broken control and remediation, not merely a CWE.

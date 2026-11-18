@@ -49,11 +49,6 @@ function sendFile(res: ServerResponse, content: string, mediaType: string, filen
   res.end(content)
 }
 
-function scanIdFromPath(pathname: string): string | undefined {
-  const parts = pathname.split('/').filter(Boolean)
-  return parts.length >= 2 ? parts[1] : undefined
-}
-
 /** Mutating HTTP routes must be same-origin JSON requests, never cross-site form posts. */
 function requireJsonMutation(req: IncomingMessage): void {
   const contentType = String(req.headers['content-type'] ?? '').split(';')[0]!.trim().toLowerCase()
@@ -143,5 +138,3 @@ export function bindRoutes(ctx: PluginContext, service: SecurityService): () => 
   const off = ctx.on?.('internal/service', () => { register() })
   return () => { off?.(); disposeRoute?.(); disposeRoute = undefined }
 }
-
-export { scanIdFromPath }

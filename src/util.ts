@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { link, mkdir, open, readFile, readdir, realpath, rename, rm } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, realpath, rename, rm } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -20,9 +20,6 @@ export function newId(prefix: string, hexChars = 24): string {
   return prefix + randomBytes(Math.ceil(hexChars / 2)).toString('hex').slice(0, hexChars)
 }
 
-export function shortId(value: string, length = 8): string {
-  return value.slice(0, length)
-}
 
 export async function ensureDir(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 })
@@ -47,23 +44,6 @@ export async function writeFileAtomic(path: string, data: string | Uint8Array): 
   } catch (error) {
     await rm(tmp, { force: true }).catch(() => undefined)
     throw error
-  }
-}
-
-/** Publish a complete file without ever replacing an existing destination. */
-export async function writeFileExclusive(path: string, data: string | Uint8Array): Promise<void> {
-  const tmp = join(dirname(path), '.' + process.pid + '.' + randomBytes(12).toString('hex') + '.tmp')
-  const handle = await open(tmp, 'wx', 0o600)
-  try {
-    try { await handle.writeFile(data) } finally { await handle.close() }
-    try { await link(tmp, path) } catch (error) {
-      // Some writable filesystems do not support hard links.
-      if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
-      const destination = await open(path, 'wx', 0o600)
-      try { await destination.writeFile(data) } finally { await destination.close() }
-    }
-  } finally {
-    await rm(tmp, { force: true })
   }
 }
 
@@ -117,9 +97,6 @@ export async function readFullText(path: string): Promise<string | undefined> {
   }
 }
 
-export function posixRelative(root: string, path: string): string {
-  return relative(root, path).split(sep).join('/')
-}
 
 /** Reject absolute paths, drive letters and .. segments; return a normalized posix relative path. */
 export function sanitizeRelative(input: string): string {
@@ -303,12 +280,6 @@ export function compareSeverity(a: string, b: string): number {
 
 export function truncate(value: string, max: number): string {
   return value.length <= max ? value : value.slice(0, Math.max(0, max - 1)) + '\u2026'
-}
-
-export function formatBytes(value: number): string {
-  if (value < 1024) return value + ' B'
-  if (value < 1024 * 1024) return (value / 1024).toFixed(1) + ' KB'
-  return (value / (1024 * 1024)).toFixed(1) + ' MB'
 }
 
 export async function listFiles(root: string, options: { maxFiles: number; exclude: string[]; include?: string[]; filter?: (path: string) => boolean; followSymlinks?: boolean; signal?: AbortSignal }): Promise<{ files: string[]; truncated: boolean; excluded: string[]; symlinks: string[] }> {
