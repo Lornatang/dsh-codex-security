@@ -54,6 +54,23 @@ function scanIdFromPath(pathname: string): string | undefined {
   return parts.length >= 2 ? parts[1] : undefined
 }
 
+/** Mutating HTTP routes must be same-origin JSON requests, never cross-site form posts. */
+function requireJsonMutation(req: IncomingMessage): void {
+  const contentType = String(req.headers['content-type'] ?? '').split(';')[0]!.trim().toLowerCase()
+  if (contentType !== 'application/json') throw new Error('request content-type must be application/json')
+  const site = req.headers['sec-fetch-site']
+  const siteValue = Array.isArray(site) ? site[0] : site
+  if (siteValue !== undefined && siteValue !== 'same-origin' && siteValue !== 'none') throw new Error('cross-site request rejected')
+  const origin = req.headers.origin
+  if (origin !== undefined) {
+    const rawOrigin = Array.isArray(origin) ? origin[0] : origin
+    let originHost = ''
+    try { originHost = new URL(rawOrigin ?? '').host } catch { throw new Error('invalid request origin') }
+    const host = req.headers.host ?? ''
+    if (!host || originHost.toLowerCase() !== host.toLowerCase()) throw new Error('cross-site request rejected')
+  }
+}
+
 export async function handleRequest(service: SecurityService, req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
     const url = new URL(req.url ?? '/', 'http://localhost')
@@ -75,11 +92,13 @@ export async function handleRequest(service: SecurityService, req: IncomingMessa
       const action = scanMatch[2]
       if (!action && method === 'GET') { sendJson(res, 200, await service.getScan({ scanId })); return }
       if (action === '/triage' && method === 'POST') {
+        requireJsonMutation(req)
         const body = await readBody(req)
         sendJson(res, 200, await service.setFindingTriage({ scanId, findingId: body['findingId'], status: body['status'], note: body['note'] }))
         return
       }
       if (action === '/remediation' && method === 'POST') {
+        requireJsonMutation(req)
         const body = await readBody(req)
         sendJson(res, 200, await service.setFindingRemediation({ scanId, findingId: body['findingId'], remediation: body['remediation'], status: body['status'] }))
         return
@@ -105,7 +124,9 @@ export async function handleRequest(service: SecurityService, req: IncomingMessa
     sendJson(res, 404, { ok: false, error: 'not found' })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    const status = /scan not found/.test(message) ? 404 : /required|must be|invalid|format|refusing/.test(message) ? 400 : 500
+    const status = /scan not found/.test(message) ? 404
+      : /managed scans can only be modified/.test(message) ? 403
+        : /required|must be|invalid|format|refusing|cross-site/.test(message) ? 400 : 500
     sendJson(res, status, { ok: false, error: message })
   }
 }

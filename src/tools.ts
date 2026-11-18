@@ -2,7 +2,7 @@ import type { SecurityService } from './service.js'
 import type { PluginContext, ToolDefinition, ToolResultBlock } from './types.js'
 import { compileToolArguments } from './schema.js'
 import type { DeepActor, DeepCoordinator } from './deep-coordinator.js'
-import { readDeepStatus } from './deep-coordinator.js'
+import { hasDeepJournal, readDeepStatus } from './deep-coordinator.js'
 
 type Json = Record<string, unknown>
 
@@ -109,7 +109,7 @@ export function createSecurityTools(service: SecurityService, getCoordinator: ()
 
     tool('codex_security_get_deep_scan_status', 'Read durable Deep orchestration status and budget usage without exposing the recovery claim.', {
       scanId: SCAN_ID,
-    }, ['scanId'], (args) => readDeepStatus(service, String(args['scanId'])), 60000),
+    }, ['scanId'], (args, exec) => readDeepStatus(service, String(args['scanId']), exec as DeepActor), 60000),
 
     tool('codex_security_get_scan_context', 'Read the current state of a scan: record, progress, draft presence, candidate/validation/attack-path counts, review items and saved artifacts. Call this when resuming work or after a context loss.', { scanId: SCAN_ID }, ['scanId'], (args) => service.getScanContext(args), 60000),
 
@@ -174,11 +174,7 @@ export function createSecurityTools(service: SecurityService, getCoordinator: ()
     }, ['scanId'], async (args, exec) => {
       const record = await service.store.get(String(args['scanId']))
       let managed = record?.record.managedParent === args['scanId']
-      if (!record) {
-        try { await readDeepStatus(service, String(args['scanId'])); managed = true } catch (error) {
-          if (!(error instanceof Error) || !error.message.includes('Deep scan journal not found')) throw error
-        }
-      }
+      if (!record && await hasDeepJournal(service, String(args['scanId']))) managed = true
       return managed ? coordinator().cancel(args, exec as DeepActor) : service.cancelScan(args)
     }, 60000),
 

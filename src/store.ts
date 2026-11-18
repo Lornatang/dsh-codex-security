@@ -12,6 +12,20 @@ export interface ScanIndex { version: 1; scans: Record<string, ScanSummary & { r
 const SEALED_FILES = new Set(['scan.json', 'findings.json', 'coverage.json', 'scan-manifest.json', 'sarif.json', 'report.md', 'threat-model.md', 'threatmodel.md'])
 const INTERNAL_FILES = new Set([...SEALED_FILES, 'candidates.json', 'validations.json', 'attack-paths.json', 'review-items.json', 'triage.json'])
 
+/**
+ * Fold an artifact path into the form Win32 uses when resolving it. Windows
+ * filesystems are case-insensitive and silently drop trailing dots and spaces,
+ * so 'SCAN.JSON', 'Scan.json.' and 'checkpoints\scan-draft.json' all address
+ * the same file as their lowercase spelling. Compare guard names in this folded
+ * form while keeping the original spelling on disk.
+ */
+function guardName(relativePath: string): string {
+  return relativePath
+    .split('/')
+    .map((segment) => segment.replace(/[ .]+$/, '').toLowerCase())
+    .join('/')
+}
+
 export interface CreateScanInput {
   scanId: string
   managedParent?: string
@@ -229,7 +243,8 @@ export class ScanStore {
     if (!found) throw new Error('codex-security: scan not found: ' + scanId)
     if (found.record.status !== 'running') throw new Error('codex-security: cannot change artifacts after scan is ' + found.record.status)
     const clean = sanitizeRelative(relativePath)
-    if (INTERNAL_FILES.has(clean) || clean === 'checkpoints' || clean.startsWith('checkpoints/')) throw new Error('codex-security: cannot overwrite internal scan path: ' + clean)
+    const guarded = guardName(clean)
+    if (INTERNAL_FILES.has(guarded) || guarded === 'checkpoints' || guarded.startsWith('checkpoints/')) throw new Error('codex-security: cannot overwrite internal scan path: ' + clean)
     const target = joinWithin(found.dir, clean)
     const data = Buffer.from(content, 'utf8')
     await ensureDir(dirname(target))
@@ -260,13 +275,13 @@ export class ScanStore {
       for (const entry of entries) {
         const rel = relBase.length > 0 ? relBase + '/' + entry.name : entry.name
         if (entry.isDirectory()) {
-          if (relBase.length === 0 && entry.name === 'checkpoints') continue
+          if (relBase.length === 0 && guardName(entry.name) === 'checkpoints') continue
           await walk(join(dir, entry.name), rel)
           continue
         }
         if (!entry.isFile()) continue
         if (/^\.\d+\.(?:\d+\.[a-f0-9]{8}|[a-f0-9]{24})\.tmp$/.test(entry.name)) continue
-        if (relBase.length === 0 && SEALED_FILES.has(entry.name)) continue
+        if (relBase.length === 0 && SEALED_FILES.has(guardName(entry.name))) continue
         const { stat } = await import('node:fs/promises')
         const info = await stat(join(dir, entry.name)).catch((error: NodeJS.ErrnoException) => {
           if (error.code === 'ENOENT') return undefined

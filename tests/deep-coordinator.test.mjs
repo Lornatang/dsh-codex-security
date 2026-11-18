@@ -117,7 +117,8 @@ test('only the owner or a holder of the recovery claim can cancel a running camp
     await assert.rejects(f.coordinator.cancel({ scanId: started.scanId }, { agent: { id: 'other' } }), /claim/i)
     await f.coordinator.cancel({ scanId: started.scanId, recoveryClaim: started.recoveryClaim }, { agent: { id: 'other' } })
     await f.coordinator.wait(started.scanId)
-    assert.equal((await readDeepStatus(f.service, started.scanId)).status, 'canceled')
+    await assert.rejects(readDeepStatus(f.service, started.scanId, { agent: { id: 'other' } }), /claim/i)
+    assert.equal((await readDeepStatus(f.service, started.scanId, { agent: { id: 'owner' } })).status, 'canceled')
     assert.equal(f.stats.active, 0)
   } finally { await f.cleanup() }
 })
@@ -262,7 +263,7 @@ test('cancellation during startup does not leave an unowned running campaign', a
     await f.coordinator.wait(started.scanId)
     const scans = await f.service.store.list()
     assert.equal(scans.length, 0)
-    assert.equal((await readDeepStatus(f.service, started.scanId)).status, 'canceled')
+    assert.equal((await readDeepStatus(f.service, started.scanId, { agent: { id: 'owner' } })).status, 'canceled')
     assert.equal(f.stats.started, 0)
   } finally { unblock(); await f.coordinator.dispose(); await f.cleanup() }
 })
@@ -299,7 +300,7 @@ test('asynchronous initialization rejects a target directory replaced after star
     await writeFile(join(f.target, 'app.js'), 'different()\n')
     unblock()
     await f.coordinator.wait(started.scanId)
-    const status = await readDeepStatus(f.service, started.scanId)
+    const status = await readDeepStatus(f.service, started.scanId, { agent: { id: 'owner' } })
     assert.equal(status.status, 'failed')
     assert.match(status.error, /target|directory.*changed/i)
     assert.equal(f.stats.started, 0)
@@ -329,7 +330,7 @@ test('cancellation interrupts child target binding before a child scan can seal'
     await f.coordinator.cancel({ scanId: started.scanId }, { agent: { id: 'owner' } })
     const elapsed = await Promise.race([f.coordinator.wait(started.scanId).then(() => 'done'), new Promise((resolve) => setTimeout(() => resolve('timeout'), 600))])
     assert.equal(elapsed, 'done')
-    assert.equal((await readDeepStatus(f.service, started.scanId)).status, 'canceled')
+    assert.equal((await readDeepStatus(f.service, started.scanId, { agent: { id: 'owner' } })).status, 'canceled')
   } finally { await f.coordinator.dispose(); await f.cleanup() }
 })
 
@@ -362,7 +363,7 @@ test('cancellation interrupts startup while another process holds the index lock
     await f.coordinator.cancel({ scanId: started.scanId }, { agent: { id: 'owner' } })
     const outcome = await Promise.race([f.coordinator.wait(started.scanId).then(() => 'done'), new Promise((resolve) => setTimeout(() => resolve('timeout'), 600))])
     assert.equal(outcome, 'done')
-    assert.equal((await readDeepStatus(f.service, started.scanId)).status, 'canceled')
+    assert.equal((await readDeepStatus(f.service, started.scanId, { agent: { id: 'owner' } })).status, 'canceled')
   } finally { release(); await f.coordinator.dispose(); await f.cleanup() }
 })
 

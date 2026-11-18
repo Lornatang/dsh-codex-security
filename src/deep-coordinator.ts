@@ -61,11 +61,23 @@ const OUTPUT_SCHEMA = {
 }
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error)).slice(0, 1200)
 
+function authorizeJournal(journal: DeepJournal, actor: DeepActor, claim?: unknown): void {
+  if (!actor?.agent || typeof actor.agent.id !== 'string' || !actor.agent.id) throw new Error('codex-security: a live calling agent is required')
+  if (actor.agent.id === journal.owner) return
+  if (typeof claim === 'string' && /^[a-f0-9]{64}$/.test(claim)) {
+    const provided = Buffer.from(sha256(claim), 'hex')
+    const expected = Buffer.from(journal.claimHash, 'hex')
+    if (provided.length === expected.length && timingSafeEqual(provided, expected)) return
+  }
+  throw new Error('codex-security: Deep scan recovery claim is required')
+}
+
 /** Public status omits the recovery-claim digest, source snapshots and worker output. */
-export async function readDeepStatus(service: SecurityService, scanId: string): Promise<Json> {
+export async function readDeepStatus(service: SecurityService, scanId: string, actor: DeepActor): Promise<Json> {
   if (!/^cs_[a-f0-9]{24}$/.test(scanId)) throw new Error('codex-security: invalid Deep scan id')
   const journal = await readJson<DeepJournal>(join(service.store.stateDir, 'deep', scanId + '.json'))
   if (!journal || journal.version !== 1 || journal.scanId !== scanId) throw new Error('codex-security: Deep scan journal not found')
+  authorizeJournal(journal, actor)
   return {
     ok: true, scanId, status: journal.status, createdAt: journal.createdAt, deadline: new Date(journal.deadline).toISOString(),
     budget: journal.budget, attempts: journal.runs.length, noNew: journal.noNew,
@@ -75,6 +87,13 @@ export async function readDeepStatus(service: SecurityService, scanId: string): 
     runs: journal.runs.map((run) => ({ number: run.number, state: run.state, scanId: run.scanId,
       ...(run.complete !== undefined ? { complete: run.complete } : {}), ...(run.error ? { error: run.error } : {}) })),
   }
+}
+
+/** Whether a Deep journal exists for a scan id, without disclosing its contents. */
+export async function hasDeepJournal(service: SecurityService, scanId: string): Promise<boolean> {
+  if (!/^cs_[a-f0-9]{24}$/.test(scanId)) return false
+  const journal = await readJson<DeepJournal>(join(service.store.stateDir, 'deep', scanId + '.json'))
+  return Boolean(journal && journal.version === 1 && journal.scanId === scanId)
 }
 
 /** Owns a Deep campaign until it seals or is interrupted. State lives on disk, not in this instance. */
@@ -97,14 +116,7 @@ export class DeepCoordinator {
     return journal
   }
   private authorize(journal: DeepJournal, actor: DeepActor, claim?: unknown): void {
-    if (!actor?.agent || typeof actor.agent.id !== 'string' || !actor.agent.id) throw new Error('codex-security: a live calling agent is required')
-    if (actor.agent.id === journal.owner) return
-    if (typeof claim === 'string' && /^[a-f0-9]{64}$/.test(claim)) {
-      const provided = Buffer.from(sha256(claim), 'hex')
-      const expected = Buffer.from(journal.claimHash, 'hex')
-      if (provided.length === expected.length && timingSafeEqual(provided, expected)) return
-    }
-    throw new Error('codex-security: Deep scan recovery claim is required')
+    authorizeJournal(journal, actor, claim)
   }
 
   async start(args: Json, actor: DeepActor): Promise<Json> {

@@ -2,7 +2,7 @@ import { lstat, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { InventoryInfo, ScopeInfo, TargetInfo, TargetKind } from './types.js'
-import { isProbablyBinary, isWithin, languageOf, listFiles, matchesAny, matchesScopePath, normalizeLine, sanitizeRelative, stableTargetId, truncate } from './util.js'
+import { isProbablyBinary, isWithin, joinWithin, languageOf, listFiles, matchesAny, matchesScopePath, normalizeLine, sanitizeRelative, stableTargetId, truncate } from './util.js'
 import { changedFiles, currentBranch, fileDigest, headRevision, remoteUrl, repoRoot, resolveRevision, statusEntries, trackedFiles } from './git.js'
 
 export interface ResolveTargetOptions {
@@ -192,15 +192,29 @@ export async function resolveDiff(rootPath: string, options: { diffTarget?: stri
 /** Read one source line for anchor derivation without trusting it as instructions. */
 export async function readEvidenceLine(rootPath: string, path: string, line: number, maxBytes: number): Promise<string | undefined> {
   const { open } = await import('node:fs/promises')
+  const { constants } = await import('node:fs')
   if (!Number.isFinite(line) || line < 1) return undefined
+  if (typeof path !== 'string' || path.length === 0) return undefined
+  let absolute: string
+  try { absolute = joinWithin(rootPath, path) } catch { return undefined }
+  const realRoot = await realpath(rootPath).catch(() => undefined)
+  if (!realRoot) return undefined
   let handle
   try {
-    const absolute = resolve(rootPath, sanitizeRelative(path))
-    if (!isWithin(rootPath, absolute)) return undefined
-    const realRoot = await realpath(rootPath).catch(() => rootPath)
-    const real = await realpath(absolute).catch(() => undefined)
-    if (real && !isWithin(realRoot, real)) return undefined
-    handle = await open(absolute, 'r')
+    const before = await lstat(absolute).catch(() => undefined)
+    if (!before || !before.isFile()) return undefined
+    const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)
+    handle = await open(absolute, flags)
+    const opened = await handle.stat()
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) return undefined
+    // Parent directories are not covered by O_NOFOLLOW, so a symlinked parent
+    // could still redirect the read outside the target. Resolve the opened
+    // path and require it to stay inside the real target root and to still
+    // name the inode we actually opened.
+    const canonical = await realpath(absolute).catch(() => undefined)
+    if (!canonical || !isWithin(realRoot, canonical)) return undefined
+    const current = await lstat(canonical).catch(() => undefined)
+    if (!current || !current.isFile() || current.dev !== opened.dev || current.ino !== opened.ino || current.size !== opened.size) return undefined
     const buffer = Buffer.alloc(Math.min(maxBytes, 256 * 1024))
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
     const text = buffer.subarray(0, bytesRead).toString('utf8')

@@ -44,6 +44,10 @@ export declare class WorkerRegistry {
     acceptFinalStep(childId: string, position: StepPosition): void;
     read(childId: string, path: string): Promise<string>;
     private readText;
+    /** Reuse the bytes verified by the preceding read; fall back to a fresh verified read. */
+    private cachedText;
+    /** Cache the verified text so chunk acceptance does not re-read whole files. */
+    private cacheText;
     readChunk(childId: string, path: string, offset: number): Promise<{
         path: string;
         content: string;

@@ -26,7 +26,9 @@ export interface DeepHost {
     }): Promise<DeepActivation>;
 }
 /** Public status omits the recovery-claim digest, source snapshots and worker output. */
-export declare function readDeepStatus(service: SecurityService, scanId: string): Promise<Json>;
+export declare function readDeepStatus(service: SecurityService, scanId: string, actor: DeepActor): Promise<Json>;
+/** Whether a Deep journal exists for a scan id, without disclosing its contents. */
+export declare function hasDeepJournal(service: SecurityService, scanId: string): Promise<boolean>;
 /** Owns a Deep campaign until it seals or is interrupted. State lives on disk, not in this instance. */
 export declare class DeepCoordinator {
     private readonly service;

@@ -17,7 +17,7 @@ import { FINDING_STATUSES, SEVERITIES } from './types.js'
 import { ScanStore, defaultStateDir } from './store.js'
 import { readEvidenceLine, resolveTarget } from './target.js'
 import { assertArtifactContract } from './schema.js'
-import { canonicalProspectivePath, ensureDir, joinWithin, newId, normalizeLine, nowIso, readFullText, readJson, sanitizeRelative, sha256, truncate, writeFileAtomic, writeJsonAtomic } from './util.js'
+import { canonicalProspectivePath, ensureDir, isWithin, joinWithin, newId, normalizeLine, nowIso, readFullText, readJson, sanitizeRelative, sha256, truncate, writeFileAtomic, writeJsonAtomic } from './util.js'
 import { createExportValidator, writeSecureExport } from './secure-export.js'
 import { acquireStateLock } from './state-lock.js'
 import { WorkerRegistry } from './deep-worker.js'
@@ -109,8 +109,15 @@ function manifestThreatModel(value: Record<string, unknown> | string): Record<st
 }
 
 function validateThreatModel(value: unknown): void {
-  if ((typeof value === 'string' && value.trim()) || asObject(value)) return
-  throw new Error('codex-security: threatModel must be a non-empty string or an object')
+  if (typeof value === 'string') {
+    if (value.trim()) return
+    throw new Error('codex-security: threatModel must be a non-empty string or an object')
+  }
+  const object = asObject(value)
+  if (!object) throw new Error('codex-security: threatModel must be a non-empty string or an object')
+  if (object['format'] === 'markdown' && (typeof object['content'] !== 'string' || object['content'].trim().length === 0)) {
+    throw new Error('codex-security: threatModel markdown content must be a non-empty string')
+  }
 }
 
 export interface SecurityServiceOptions {
@@ -559,8 +566,10 @@ export class SecurityService {
     for (const finding of findings) {
       const location = finding.locations?.[0]
       if (!location) continue
-      const key = location.path + ':' + location.startLine
-      if (!keys.has(key)) keys.set(key, { path: location.path, line: location.startLine })
+      let path: string
+      try { path = sanitizeRelative(location.path) } catch { continue }
+      const key = path + ':' + location.startLine
+      if (!keys.has(key)) keys.set(key, { path, line: location.startLine })
       if (keys.size >= 500) break
     }
     const evidence = new Map<string, string>()
@@ -924,6 +933,7 @@ export class SecurityService {
       }
     }
     const threatModel = draft.input.threatModel ?? record.threatModel
+    if (threatModel !== undefined) validateThreatModel(threatModel)
     const sealedAt = nowIso()
     const findingsDocument = buildFindingsDocument(scanId, findings)
     const sarif = toSarif(record, findings)
@@ -931,27 +941,20 @@ export class SecurityService {
     validateFindingEvidence(findings)
     assertArtifactContract('findings', findingsDocument)
     assertArtifactContract('coverage', coverage)
-    await writeJsonAtomic(join(dir, 'findings.json'), findingsDocument)
-    await writeJsonAtomic(join(dir, 'coverage.json'), coverage)
-    await writeJsonAtomic(join(dir, 'sarif.json'), sarif)
-    await writeFileAtomic(join(dir, 'report.md'), report)
-    if (threatModel !== undefined) {
-      await writeFileAtomic(join(dir, 'threat-model.md'), renderThreatModel(threatModel))
-      await writeFileAtomic(join(dir, 'threatmodel.md'), renderThreatModel(threatModel))
-    }
-    const sealFiles: { path: string; mediaType: string }[] = [
-      { path: 'findings.json', mediaType: 'application/json' },
-      { path: 'coverage.json', mediaType: 'application/json' },
-      { path: 'sarif.json', mediaType: 'application/sarif+json' },
-      { path: 'report.md', mediaType: 'text/markdown' },
+    // Build every sealed document in memory and validate the manifest before
+    // publishing any file, so a schema failure can never leave sealed artifacts
+    // behind on a scan that is still running.
+    const sealedFiles: { path: string; mediaType: string; content: string }[] = [
+      { path: 'findings.json', mediaType: 'application/json', content: JSON.stringify(findingsDocument, null, 2) + '\n' },
+      { path: 'coverage.json', mediaType: 'application/json', content: JSON.stringify(coverage, null, 2) + '\n' },
+      { path: 'sarif.json', mediaType: 'application/sarif+json', content: JSON.stringify(sarif, null, 2) + '\n' },
+      { path: 'report.md', mediaType: 'text/markdown', content: report },
     ]
-    if (threatModel !== undefined) sealFiles.push({ path: 'threat-model.md', mediaType: 'text/markdown' }, { path: 'threatmodel.md', mediaType: 'text/markdown' })
-    const artifacts: { path: string; sha256: string; mediaType: string }[] = []
-    for (const file of sealFiles) {
-      options?.signal?.throwIfAborted()
-      const data = await readFile(joinWithin(dir, file.path))
-      artifacts.push({ path: file.path, sha256: sha256(data), mediaType: file.mediaType })
+    if (threatModel !== undefined) {
+      const rendered = renderThreatModel(threatModel)
+      sealedFiles.push({ path: 'threat-model.md', mediaType: 'text/markdown', content: rendered }, { path: 'threatmodel.md', mediaType: 'text/markdown', content: rendered })
     }
+    const artifacts: { path: string; sha256: string; mediaType: string }[] = sealedFiles.map((file) => ({ path: file.path, sha256: sha256(file.content), mediaType: file.mediaType }))
     for (const artifact of record.artifacts) {
       options?.signal?.throwIfAborted()
       const data = await readFile(joinWithin(dir, artifact.path))
@@ -999,6 +1002,10 @@ export class SecurityService {
       },
     }
     assertArtifactContract('scan-manifest', manifest)
+    for (const file of sealedFiles) {
+      options?.signal?.throwIfAborted()
+      await writeFileAtomic(joinWithin(dir, file.path), file.content)
+    }
     await writeJsonAtomic(join(dir, 'scan-manifest.json'), manifest)
     const counts = severityCounts(findings)
     options?.signal?.throwIfAborted()
@@ -1214,6 +1221,12 @@ export class SecurityService {
     const requestedOutput = requested
       ? resolvePath(requested)
       : join(this.store.stateDir, 'exports', scanId + '.' + extension)
+    const stateRoot = await canonicalProspectivePath(this.store.stateDir)
+    const exportsRoot = await canonicalProspectivePath(join(this.store.stateDir, 'exports'))
+    const canonicalOutput = await canonicalProspectivePath(requestedOutput)
+    if (isWithin(stateRoot, canonicalOutput) && !isWithin(exportsRoot, canonicalOutput)) {
+      throw new Error('codex-security: refusing to export into scan storage outside the exports directory: ' + requestedOutput)
+    }
     const allowedRoots = await Promise.all([this.store.stateDir, process.cwd(), record.target.rootPath].map(canonicalProspectivePath))
     const scanRoot = join(this.store.stateDir, 'repositories')
     let requireGit = record.target.kind !== 'directory_snapshot'

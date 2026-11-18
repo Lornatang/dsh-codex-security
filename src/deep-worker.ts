@@ -18,7 +18,11 @@ interface Binding extends WorkerSnapshot {
   ranges: Map<string, ReceiptRange[]>
   finalStep?: StepPosition
   allowUnpositioned: boolean
+  textCache: Map<string, string>
 }
+
+const TEXT_CACHE_ENTRIES = 8
+const TEXT_CACHE_BYTES = 4 * 1024 * 1024
 export interface StepPosition { turn: number; step: number }
 export interface ReceiptRange { start: number; end: number; total: number; position?: StepPosition }
 
@@ -98,7 +102,7 @@ export class WorkerRegistry {
       files[path] = { sha256: item.sha256 }
     }
     if (!Number.isSafeInteger(snapshot.maxFileBytes) || snapshot.maxFileBytes < 1) throw new Error('codex-security: invalid worker size limit')
-    this.workers.set(childId, { rootPath: root.path, rootNode: root.identity, maxFileBytes: snapshot.maxFileBytes, files, receipts: new Set(), ranges: new Map(), allowUnpositioned: options.allowUnpositionedReceipts === true })
+    this.workers.set(childId, { rootPath: root.path, rootNode: root.identity, maxFileBytes: snapshot.maxFileBytes, files, receipts: new Set(), ranges: new Map(), allowUnpositioned: options.allowUnpositionedReceipts === true, textCache: new Map() })
   }
 
   release(childId: string): void { this.workers.delete(childId) }
@@ -142,7 +146,29 @@ export class WorkerRegistry {
     const bytes = readWorkerSource(binding.rootPath, source, binding.maxFileBytes, binding.rootNode, file.sha256)
     const text = bytes.toString('utf8')
     if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error('codex-security: worker source is not valid UTF-8')
+    this.cacheText(binding, source, text)
     return text
+  }
+
+  /** Reuse the bytes verified by the preceding read; fall back to a fresh verified read. */
+  private cachedText(childId: string, path: string): string {
+    const binding = this.binding(childId)
+    const source = workerSourcePath(path)
+    const cached = binding.textCache.get(source)
+    return cached !== undefined ? cached : this.readText(childId, path)
+  }
+
+  /** Cache the verified text so chunk acceptance does not re-read whole files. */
+  private cacheText(binding: Binding, source: string, text: string): void {
+    binding.textCache.set(source, text)
+    let bytes = 0
+    for (const value of binding.textCache.values()) bytes += Buffer.byteLength(value, 'utf8')
+    while (binding.textCache.size > TEXT_CACHE_ENTRIES || bytes > TEXT_CACHE_BYTES) {
+      const oldest = binding.textCache.keys().next().value
+      if (oldest === undefined) break
+      bytes -= Buffer.byteLength(binding.textCache.get(oldest) ?? '', 'utf8')
+      binding.textCache.delete(oldest)
+    }
   }
 
   async readChunk(childId: string, path: string, offset: number): Promise<{ path: string; content: string; offset: number; nextOffset: number | null; totalLength: number }> {
@@ -160,7 +186,7 @@ export class WorkerRegistry {
     if (!position && !binding.allowUnpositioned) return
     const end = value.offset + value.content.length
     if (value.offset < 0 || end > value.totalLength || (value.nextOffset !== null && value.nextOffset !== end) || (value.nextOffset === null && end !== value.totalLength)) return
-    const original = this.readText(childId, value.path)
+    const original = this.cachedText(childId, value.path)
     if (original.length !== value.totalLength || original.slice(value.offset, end) !== value.content) return
     const ranges = mergeReceiptRanges(binding.ranges.get(value.path) ?? [], { start: value.offset, end, total: value.totalLength, ...(position ? { position } : {}) })
     if (ranges.length > 16384) return

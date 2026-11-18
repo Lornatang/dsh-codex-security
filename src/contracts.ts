@@ -184,7 +184,15 @@ export function validateDraft(input: unknown): ScanDraftInput {
     }
   }
   if (reviewState.explicitExclusions !== undefined && !Array.isArray(reviewState.explicitExclusions)) throw new Error('codex-security: reviewState.explicitExclusions must be an array')
-  if (reviewState.deferred !== undefined && !Array.isArray(reviewState.deferred)) throw new Error('codex-security: reviewState.deferred must be an array')
+  if (reviewState.deferred !== undefined) {
+    if (!Array.isArray(reviewState.deferred)) throw new Error('codex-security: reviewState.deferred must be an array')
+    const deferredIds = new Set<string>()
+    for (const entry of reviewState.deferred) {
+      if (!entry || typeof entry.id !== 'string' || entry.id.trim().length === 0) throw new Error('codex-security: each deferred entry needs a non-empty id')
+      if (deferredIds.has(entry.id)) throw new Error('codex-security: reviewState.deferred ids must be unique')
+      deferredIds.add(entry.id)
+    }
+  }
   return draft
 }
 

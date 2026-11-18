@@ -140,6 +140,11 @@ test('unsealed threat-model projections follow the latest draft or context', asy
     await f.service.recordScanDraft({ scanId: scan.scanId, complete: false, findings: [], coverage: { completeness: 'partial', surfaces: [{ label: 'source', disposition: 'needs_follow_up' }] }, threatModel: { format: 'markdown', content: '# Initial model\n' } })
     assert.equal(await readFile(join(dir, 'threatmodel.md'), 'utf8'), '# Initial model\n')
     await assert.rejects(f.service.saveArtifact({ scanId: scan.scanId, path: 'threatmodel.md', content: 'overwrite' }), /reserved|internal|sealed/i)
+    // Win32 resolves names case-insensitively and drops trailing dots/spaces, so
+    // every spelling that aliases an internal file must be rejected too.
+    for (const alias of ['ThreatModel.md', 'threatmodel.md.', 'threatmodel.md ', 'CHECKPOINTS/scan-draft.json', 'triage.json.']) {
+      await assert.rejects(f.service.saveArtifact({ scanId: scan.scanId, path: alias, content: 'overwrite' }), /reserved|internal|sealed/i)
+    }
     await f.service.updateScanContext({ scanId: scan.scanId, threatModel: { format: 'markdown', content: '# Updated model\n' } })
     assert.equal(await readFile(join(dir, 'threatmodel.md'), 'utf8'), '# Updated model\n')
     await f.service.recordScanDraft({ scanId: scan.scanId, ...draft() })

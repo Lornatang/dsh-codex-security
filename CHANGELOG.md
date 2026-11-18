@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.10] - 2026-11-18
+
+### Security
+
+- Refuse export destinations inside the scan state directory but outside its exports directory, so a scan cannot publish a file that aborts or rewrites another Deep run.
+- Require the Deep status tool to authorize the caller like every other Deep operation.
+- Reject cross-site and non-JSON HTTP mutations, and return 403 for managed scans instead of 500.
+
+### Fixed
+
+- Validate the scan manifest before publishing sealed artifacts, so an invalid threat model cannot leave a scan stuck as running with sealed files.
+- Key collected evidence by the sanitized location path so fingerprints, deduplication and scan comparison stay stable.
+- Require a unique non-empty id for every deferred coverage entry instead of stringifying a missing one.
+- Cache verified worker text per binding, so transferring a file in 4 KiB chunks no longer re-reads the whole file twice per chunk.
+
 ## [0.1.9] - 2026-11-17
 
 ### Security
