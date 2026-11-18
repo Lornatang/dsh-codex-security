@@ -86,7 +86,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/dsh-agent-preset-registry": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-skill": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-skill": "0.2.2-rc.3",
     "@deepseek-ai/dsh-subagent": "0.2.2-rc.2",
     "@deepseek-ai/dsh-subagent-spawn-in-process": "0.2.2-rc.2",
     "@deepseek-ai/dsh-tool-executor-native": "0.2.2-rc.2",
