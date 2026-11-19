@@ -81,10 +81,13 @@ export async function readDeepStatus(service: SecurityService, scanId: string, a
   const journal = await readJson<DeepJournal>(join(service.store.stateDir, 'deep', scanId + '.json'))
   if (!journal || journal.version !== 1 || journal.scanId !== scanId) throw new Error('codex-security: Deep scan journal not found')
   authorizeJournal(journal, actor)
+  const checkParent = journal.status === 'running' || journal.status === 'failed'
+  const parent = checkParent ? await service.store.get(scanId) : undefined
+  const status = parent?.record.managedParent === scanId && parent.record.status === 'completed' ? 'completed' : journal.status
   return {
-    ok: true, scanId, status: journal.status, createdAt: journal.createdAt, deadline: new Date(journal.deadline).toISOString(),
+    ok: true, scanId, status, createdAt: journal.createdAt, deadline: new Date(journal.deadline).toISOString(),
     budget: journal.budget, attempts: journal.runs.length, noNew: journal.noNew,
-    ...(journal.stopReason ? { stopReason: journal.stopReason } : {}), ...(journal.error ? { error: journal.error } : {}),
+    ...(journal.stopReason ? { stopReason: journal.stopReason } : {}), ...(journal.error && status !== 'completed' ? { error: journal.error } : {}),
     availableFiles: Object.keys(journal.snapshot?.files ?? {}).length,
     unavailableFiles: journal.snapshot?.unavailable?.length ?? 0,
     runs: journal.runs.map((run) => ({ number: run.number, state: run.state, scanId: run.scanId,
@@ -331,12 +334,17 @@ export class DeepCoordinator {
   }
 
   private async failOwned(journal: DeepJournal, error: unknown): Promise<void> {
-    journal.status = 'failed'
-    journal.error = errorText(error)
     const scan = await this.service.store.get(journal.scanId)
-    if (scan?.record.status === 'running') {
-      const args = { scanId: journal.scanId, error: journal.error }
-      await this.managed(args, () => this.service.failScan(args))
+    if (scan?.record.managedParent === journal.scanId && scan.record.status === 'completed') {
+      journal.status = 'completed'
+      delete journal.error
+    } else {
+      journal.status = 'failed'
+      journal.error = errorText(error)
+      if (scan?.record.status === 'running') {
+        const args = { scanId: journal.scanId, error: journal.error }
+        await this.managed(args, () => this.service.failScan(args))
+      }
     }
     await this.save(journal)
   }

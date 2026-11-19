@@ -1,4 +1,4 @@
-import { readdir, stat } from 'node:fs/promises'
+import { readdir, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { Finding, ScanRecord, ScanSummary, Severity, TriageEntry } from './types.js'
 import { ensureDir, joinWithin, nowIso, readJson, readText, sanitizeRelative, writeFileAtomic, writeJsonAtomic, sha256 } from './util.js'
@@ -88,6 +88,7 @@ export class ScanStore {
   constructor(public readonly stateDir: string) {}
 
   private get indexPath(): string { return join(this.stateDir, 'index.json') }
+  private get indexLockPath(): string { return join(this.stateDir, '.locks', 'index.sqlite') }
 
   scanDir(record: Pick<ScanRecord, 'repoKey' | 'scanId'>): string {
     return join(this.stateDir, 'repositories', record.repoKey, 'scans', record.scanId)
@@ -101,7 +102,7 @@ export class ScanStore {
   private serialize<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const guarded = async (): Promise<T> => {
       signal?.throwIfAborted()
-      const release = await acquireStateLock(join(this.stateDir, '.locks', 'index.sqlite'), { signal })
+      const release = await acquireStateLock(this.indexLockPath, { signal })
       try { signal?.throwIfAborted(); return await operation() } finally { release() }
     }
     const next = this.queue.then(guarded, guarded)
@@ -115,23 +116,19 @@ export class ScanStore {
     return info ? info.mtimeMs + ':' + info.size + ':' + info.ino : undefined
   }
 
-  async loadIndex(): Promise<ScanIndex> {
+  private async readIndex(): Promise<ScanIndex | undefined> {
     const stamp = await this.indexFileStamp()
-    if (stamp !== undefined) {
-      if (this.indexCache && this.indexStamp === stamp) return this.indexCache
-      const stored = await readJson<ScanIndex>(this.indexPath)
-      if (stored && stored.version === 1) {
-        this.indexCache = stored
-        this.indexStamp = stamp
-        return stored
-      }
-    } else if (this.indexCache && this.indexStamp === undefined) {
-      return this.indexCache
-    }
-    const rebuilt = await this.rebuildIndex()
-    this.indexCache = rebuilt
-    this.indexStamp = undefined
-    return rebuilt
+    if (stamp === undefined) return undefined
+    if (this.indexCache && this.indexStamp === stamp) return this.indexCache
+    const stored = await readJson<ScanIndex>(this.indexPath)
+    if (stored?.version !== 1) return undefined
+    this.indexCache = stored
+    this.indexStamp = stamp
+    return stored
+  }
+
+  async loadIndex(): Promise<ScanIndex> {
+    return (await this.readIndex()) ?? this.rebuildIndex()
   }
 
   private async rebuildIndex(): Promise<ScanIndex> {
@@ -227,21 +224,35 @@ export class ScanStore {
     signal?: AbortSignal
     publish?: (commit: () => Promise<void>) => Promise<void>
   } = {}): Promise<ScanRecord> {
-    return this.serialize(async () => {
-      const found = await this.get(scanId)
-      if (!found) throw new Error('codex-security: scan not found: ' + scanId)
-      const record = found.record
-      mutate(record)
-      record.updatedAt = nowIso()
-      record.progress.updatedAt = record.updatedAt
-      const commit = () => this.writeRecord(record)
-      if (options.publish) await options.publish(commit)
-      else await commit()
-      const index = await this.loadIndex()
-      index.scans[record.scanId] = { ...summarize(record), repoKey: record.repoKey }
-      await this.saveIndex(index)
-      return record
-    }, options.signal)
+    let published: ScanRecord | undefined
+    try {
+      return await this.serialize(async () => {
+        const found = await this.get(scanId)
+        if (!found) throw new Error('codex-security: scan not found: ' + scanId)
+        const record = found.record
+        mutate(record)
+        record.updatedAt = nowIso()
+        record.progress.updatedAt = record.updatedAt
+        const index = await this.loadIndex()
+        const nextIndex = { ...index, scans: { ...index.scans, [scanId]: summarize(record) } }
+        if (options.publish) {
+          await options.publish(async () => {
+            // A missing index is rebuilt from scan records. Invalidate it before
+            // commit so a crash cannot leave a stale running summary on disk.
+            await rm(this.indexPath, { force: true })
+            await this.writeRecord(record)
+            published = record
+          })
+        } else {
+          await this.writeRecord(record)
+        }
+        await this.saveIndex(nextIndex)
+        return record
+      }, options.signal)
+    } catch (error) {
+      if (published) return published
+      throw error
+    }
   }
 
   async writeScanFile(scanId: string, name: string, value: unknown): Promise<string> {
@@ -261,9 +272,19 @@ export class ScanStore {
   }
 
   async list(): Promise<ScanSummary[]> {
-    // Read-only fast path: list never mutates scan state and must not serialize behind
-    // the index lock. The cached index is reused until index.json changes on disk.
-    const index = await this.loadIndex()
+    let index = await this.readIndex()
+    if (!index) {
+      // Rebuild while publication owns the lock without waiting. If the lock
+      // is free, persist the repair to restore the cached path for later reads.
+      const release = await acquireStateLock(this.indexLockPath, { timeoutMs: 0 }).catch(() => undefined)
+      try {
+        if (release) index = await this.readIndex()
+        if (!index) {
+          index = await this.rebuildIndex()
+          if (release) await this.saveIndex(index).catch(() => undefined)
+        }
+      } finally { release?.() }
+    }
     return Object.values(index.scans).sort((left, right) => right.createdAt.localeCompare(left.createdAt))
   }
 

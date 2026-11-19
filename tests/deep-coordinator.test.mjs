@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { access, mkdtemp, mkdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -53,7 +53,10 @@ test('automatic Deep bounds parallelism and attempts, then seals independently c
   const secondWorker = Promise.withResolvers()
   const f = await fixture({ waitForWorker: (run) => {
     if (run === 2) secondWorker.resolve()
-    if (run === 1) return secondWorker.promise
+    if (run === 1) return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Second worker did not start')), 15000)
+      void secondWorker.promise.then(() => { clearTimeout(timer); resolve() })
+    })
   } })
   try {
     const started = await f.coordinator.start({ targetPath: f.target, workers: 2, maxDiscoveryRuns: 3, stopAfterNoNew: 20 }, { agent: { id: 'owner' } })
@@ -71,7 +74,11 @@ test('automatic Deep bounds parallelism and attempts, then seals independently c
       const result = execFileSync('python', [validator, '--scan-dir', directory], { encoding: 'utf8' })
       assert.equal(JSON.parse(result).status, 'valid')
     }
-  } finally { await f.cleanup() }
+  } finally {
+    secondWorker.resolve()
+    await f.coordinator.dispose()
+    await f.cleanup()
+  }
 })
 
 test('zero findings without a complete worker read receipt fails closed', async () => {
@@ -505,5 +512,28 @@ test('journal transitions avoid serializing historical run payloads', async () =
     await f.coordinator.wait(scanId)
     assert.equal((await f.service.getScan({ scanId })).scan.status, 'completed')
     assert.equal(serializations, 1)
+  } finally { await f.cleanup() }
+})
+
+
+test('an interrupted terminal journal write cannot turn a sealed Deep result into failure', async () => {
+  const f = await fixture()
+  const save = f.coordinator.save.bind(f.coordinator)
+  let statusDuringGap
+  f.coordinator.save = async (journal) => {
+    if (journal.status === 'completed' && statusDuringGap === undefined) {
+      statusDuringGap = (await readDeepStatus(f.service, journal.scanId, { agent: { id: 'owner' } })).status
+      throw new Error('journal temporarily unavailable')
+    }
+    return save(journal)
+  }
+  try {
+    const { scanId } = await f.coordinator.start({ targetPath: f.target, workers: 1, maxDiscoveryRuns: 1 }, { agent: { id: 'owner' } })
+    await f.coordinator.wait(scanId)
+    assert.equal(statusDuringGap, 'completed')
+    assert.equal((await f.service.getScan({ scanId })).manifest.status, 'completed')
+    const journal = JSON.parse(await readFile(join(f.service.store.stateDir, 'deep', scanId + '.json'), 'utf8'))
+    assert.equal(journal.status, 'completed')
+    assert.equal(journal.error, undefined)
   } finally { await f.cleanup() }
 })

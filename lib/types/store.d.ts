@@ -31,11 +31,13 @@ export declare class ScanStore {
     private indexStamp?;
     constructor(stateDir: string);
     private get indexPath();
+    private get indexLockPath();
     scanDir(record: Pick<ScanRecord, 'repoKey' | 'scanId'>): string;
     init(): Promise<void>;
     private serialize;
     /** Cheap identity of index.json so a changed on-disk index invalidates the cache. */
     private indexFileStamp;
+    private readIndex;
     loadIndex(): Promise<ScanIndex>;
     private rebuildIndex;
     saveIndex(index: ScanIndex): Promise<void>;

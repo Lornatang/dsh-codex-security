@@ -14,6 +14,7 @@ import { createSecurityTools } from '../lib/tools.js'
 import { ScanStore } from '../lib/store.js'
 import { TOOL_NAMES, VERSION } from '../lib/constants.js'
 import { normalizeFinding } from '../lib/contracts.js'
+import { acquireStateLock } from '../lib/state-lock.js'
 
 const options = { maxFiles: 100, maxFileBytes: 1024 }
 const draft = (findings = [], complete = true, surfaces = [{ label: 'source', disposition: 'no_issue_found' }]) => ({
@@ -667,4 +668,56 @@ test('a pre-update revision draft with a worktree-derived anchor must be recorde
     await f.service.recordScanDraft({ scanId, ...draft([annotation]) })
     assert.equal((await f.service.completeScan({ scanId })).status, 'completed')
   } finally { await f.cleanup() }
+})
+
+
+test('a committed seal survives an index write failure and readers repair the index', { timeout: 60000 }, async () => {
+  const f = await fixture()
+  const committing = Promise.withResolvers()
+  const proceed = Promise.withResolvers()
+  let completion
+  try {
+    const { scanId } = await f.service.startScan({ targetPath: f.target }, 'standard')
+    await f.service.recordScanDraft({ scanId, ...draft() })
+    const state = f.service.store.stateDir
+    const observer = new ScanStore(state)
+    const statusOf = async (store) => (await store.list()).find((entry) => entry.scanId === scanId).status
+    const indexStatus = async () => JSON.parse(await readFile(join(state, 'index.json'), 'utf8')).scans[scanId].status
+    const writeRecord = f.service.store.writeRecord.bind(f.service.store)
+    f.service.store.writeRecord = async (record) => {
+      if (record.scanId === scanId && record.status === 'completed') {
+        committing.resolve()
+        await proceed.promise
+      }
+      await writeRecord(record)
+    }
+    const saveIndex = f.service.store.saveIndex.bind(f.service.store)
+    f.service.store.saveIndex = async (index) => {
+      if (index.scans[scanId]?.status === 'completed') throw new Error('index temporarily unavailable')
+      return saveIndex(index)
+    }
+
+    completion = f.service.completeScan({ scanId })
+    void completion.catch(committing.reject)
+    await committing.promise
+    await assert.rejects(indexStatus(), { code: 'ENOENT' })
+    assert.equal(await statusOf(observer), 'running')
+    proceed.resolve()
+    assert.equal((await completion).status, 'completed')
+    assert.equal((await f.service.getScan({ scanId })).manifest.status, 'completed')
+    await assert.rejects(indexStatus(), { code: 'ENOENT' })
+
+    const release = await acquireStateLock(join(state, '.locks', 'index.sqlite'))
+    try {
+      assert.equal(await statusOf(observer), 'completed')
+      await assert.rejects(indexStatus(), { code: 'ENOENT' })
+    } finally { release() }
+
+    assert.equal(await statusOf(new ScanStore(state)), 'completed')
+    assert.equal(await indexStatus(), 'completed')
+  } finally {
+    proceed.resolve()
+    await completion?.catch(() => undefined)
+    await f.cleanup()
+  }
 })
