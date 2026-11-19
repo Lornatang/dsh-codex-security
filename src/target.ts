@@ -13,6 +13,7 @@ export interface ResolveTargetOptions {
   workingTree?: boolean
   maxFiles: number
   maxFileBytes: number
+  evidencePaths?: ReadonlySet<string>
   signal?: AbortSignal
 }
 
@@ -21,6 +22,7 @@ export interface ResolvedTarget {
   scope: ScopeInfo
   inventory: InventoryInfo
   files: string[]
+  fileDigests: Map<string, string>
   diffFiles?: DiffSnapshot['files']
   warnings: string[]
 }
@@ -92,6 +94,7 @@ export async function resolveTarget(options: ResolveTargetOptions): Promise<Reso
   }
 
   const snapshot = createHash('sha256')
+  const fileDigests = new Map<string, string>()
   snapshot.update(JSON.stringify({ kind, revision: revision ?? null, baseRevision: baseRevision ?? null, diffFiles: diffFiles ?? null }))
   // Commit-only diffs are bound to immutable revisions; working-tree and
   // directory scans must also bind the actual content being reviewed.
@@ -101,6 +104,7 @@ export async function resolveTarget(options: ResolveTargetOptions): Promise<Reso
       const info = await lstat(absolute).catch(() => undefined)
       const digest = info?.isFile() ? await fileDigest(absolute, options.signal) : undefined
       if (!digest) warnings.push('snapshot could not hash file: ' + file)
+      else if (options.evidencePaths?.has(file)) fileDigests.set(file, digest)
       snapshot.update('\u0000' + file + '\u0000' + (digest ?? 'unavailable'))
     }
   }
@@ -136,7 +140,7 @@ export async function resolveTarget(options: ResolveTargetOptions): Promise<Reso
     excluded: DEFAULT_EXCLUDES,
     truncated: inventoryFiles.truncated,
   }
-  return { target, scope, inventory, files, warnings, ...(diffFiles ? { diffFiles } : {}) }
+  return { target, scope, inventory, files, fileDigests, warnings, ...(diffFiles ? { diffFiles } : {}) }
 }
 
 function safeRemote(value: string): string | undefined {

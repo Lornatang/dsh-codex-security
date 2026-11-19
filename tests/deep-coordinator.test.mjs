@@ -68,6 +68,9 @@ test('automatic Deep bounds parallelism and attempts, then seals independently c
     assert.equal(f.stats.peak, 2)
     assert.equal(parent.findingsCount, 0)
     assert.equal(parent.progress.discoveryRuns, 3)
+    const coverage = await f.service.store.readScanFile(started.scanId, 'coverage.json')
+    assert.deepEqual(coverage.sourceDelivery, { deliveredFiles: 1, eligibleFiles: 1 })
+    assert.equal(coverage.surfaces.filter(surface => surface.sourceEvidence?.length).length, 0)
     if (process.env.CODEX_SECURITY_REFERENCE_ROOT) {
       const validator = join(process.env.CODEX_SECURITY_REFERENCE_ROOT, 'scripts', 'validate_scan_contract.py')
       const directory = (await f.service.store.get(started.scanId)).dir
@@ -90,6 +93,30 @@ test('zero findings without a complete worker read receipt fails closed', async 
     assert.equal(parent.status, 'failed')
     assert.match(parent.error, /complete|receipt|review/i)
   } finally { await f.cleanup() }
+})
+
+test('Deep retains sealed unit evidence and requires delivery to the claiming worker', async () => {
+  const draft = { findings: [], reviewState: { completeness: 'complete', surfaces: [{
+    id: 'constant-value', label: 'Fixture value', invariant: 'The value is declared as a constant.',
+    disposition: 'no_issue_found', notes: 'The declaration uses const.',
+    sourceEvidence: [{ path: 'app.js', startLine: 1, endLine: 1, excerpt: 'const value = 1' }],
+  }] } }
+  const f = await fixture({ result: draft, skipReads: run => run === 1 })
+  try {
+    const started = await f.coordinator.start({ targetPath: f.target, workers: 1, maxDiscoveryRuns: 2 }, { agent: { id: 'owner' } })
+    await f.coordinator.wait(started.scanId)
+    const parent = (await f.service.getScanContext({ scanId: started.scanId })).scan
+    assert.equal(parent.status, 'completed')
+    const coverage = await f.service.store.readScanFile(started.scanId, 'coverage.json')
+    assert.equal(coverage.completeness, 'partial')
+    assert.deepEqual(coverage.sourceDelivery, { deliveredFiles: 1, eligibleFiles: 1 })
+    assert.deepEqual(coverage.surfaces.map(surface => surface.id), ['worker-2-constant-value'])
+    assert.equal(coverage.surfaces[0].invariant, draft.reviewState.surfaces[0].invariant)
+    const [ref] = coverage.surfaces[0].sourceEvidence
+    assert.equal(ref.path, 'app.js')
+    assert.match(ref.excerptSha256, /^[a-f0-9]{64}$/)
+    assert.equal(ref.excerpt, undefined)
+  } finally { await f.coordinator.dispose(); await f.cleanup() }
 })
 
 test('malformed worker output cannot produce a clean scan', async () => {

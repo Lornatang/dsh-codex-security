@@ -1,5 +1,6 @@
 import type { Config } from './config.js';
 import type { PluginContext } from './types.js';
+import type { CoverageSurface, SourceDelivery } from './types.js';
 import { ScanStore } from './store.js';
 import type { WorkerSnapshot } from './deep-worker.js';
 export declare const FORMATS: readonly ["sarif", "json", "csv", "markdown"];
@@ -7,6 +8,8 @@ export type ExportFormat = (typeof FORMATS)[number];
 interface SealOptions {
     signal?: AbortSignal;
     withPublication?: (publish: () => Promise<void>) => Promise<void>;
+    sourceDelivery?: SourceDelivery;
+    workerSurfaces?: CoverageSurface[];
 }
 type Json = Record<string, unknown>;
 export interface SecurityServiceOptions {
@@ -65,6 +68,7 @@ export declare class SecurityService {
     private saveArtifactUnlocked;
     readArtifact(args: Json): Promise<Json>;
     completeScan(args: Json, options?: SealOptions): Promise<Json>;
+    private verifyCoverageEvidence;
     private completeScanUnlocked;
     failScan(args: Json): Promise<Json>;
     private failScanUnlocked;

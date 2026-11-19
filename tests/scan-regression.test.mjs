@@ -118,7 +118,7 @@ test('Codex-compatible draft and sealed artifacts preserve evidence and identiti
     assert.deepEqual(manifest.scan.scope.artifactsReviewed, ['src/app.js'])
     assert.equal(manifest.scan.threatModel.content, '# Threat model\n\nAn external caller provides input.\n')
     assert.equal(await readFile(join(dirname(completed.reportPath), 'threatmodel.md'), 'utf8'), manifest.scan.threatModel.content)
-    assert.match(await readFile(completed.reportPath, 'utf8'), /Files inventoried/)
+    assert.match(await readFile(completed.reportPath, 'utf8'), /Files enumerated/)
     await writeFile(join(f.target, 'src', 'app.js'), 'changed(input)\n')
     f.runGit('add', '.')
     f.runGit('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'next')

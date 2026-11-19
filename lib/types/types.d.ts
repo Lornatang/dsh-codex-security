@@ -90,6 +90,11 @@ export interface Finding {
     extensions?: Record<string, unknown>;
     [key: string]: unknown;
 }
+export interface SourceReference {
+    path: string;
+    startLine: number;
+    endLine: number;
+}
 export interface DraftSurface {
     id?: string;
     label: string;
@@ -97,6 +102,10 @@ export interface DraftSurface {
     receiptRefs?: string[];
     riskArea?: string;
     notes?: string;
+    invariant?: string;
+    sourceEvidence?: (SourceReference & {
+        excerpt: string;
+    })[];
     [key: string]: unknown;
 }
 export interface DraftExclusion {
@@ -357,6 +366,10 @@ export interface TriageEntry {
     remediation?: string;
     updatedAt: string;
 }
+export interface SourceDelivery {
+    deliveredFiles: number;
+    eligibleFiles: number;
+}
 export interface CoverageSurface {
     id: string;
     label: string;
@@ -364,6 +377,10 @@ export interface CoverageSurface {
     receiptRefs: string[];
     riskArea?: string;
     notes?: string;
+    invariant?: string;
+    sourceEvidence?: (SourceReference & {
+        excerptSha256: string;
+    })[];
 }
 export interface CoverageDocument {
     documentType: 'codex-security.coverage';
@@ -372,6 +389,8 @@ export interface CoverageDocument {
     mode: string;
     completeness?: 'complete' | 'partial' | 'unknown';
     inventoryStrategy: string;
+    sourceDelivery?: SourceDelivery;
+    sourceCoverageVersion?: 1;
     includePaths: string[];
     excludePaths: string[];
     surfaces: CoverageSurface[];

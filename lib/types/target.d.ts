@@ -7,6 +7,7 @@ export interface ResolveTargetOptions {
     workingTree?: boolean;
     maxFiles: number;
     maxFileBytes: number;
+    evidencePaths?: ReadonlySet<string>;
     signal?: AbortSignal;
 }
 export interface ResolvedTarget {
@@ -14,6 +15,7 @@ export interface ResolvedTarget {
     scope: ScopeInfo;
     inventory: InventoryInfo;
     files: string[];
+    fileDigests: Map<string, string>;
     diffFiles?: DiffSnapshot['files'];
     warnings: string[];
 }

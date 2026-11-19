@@ -7,22 +7,23 @@ import {
   buildCoverage, buildFindingsDocument, fingerprintFor, normalizeAnchor, normalizeRuleId, normalizeFinding,
   policyGate, renderReport, severityCounts, sortedFindings, toCsv, toSarif, validateDraft, validateFindingEvidence,
 } from './contracts.js'
-import { gitString } from './git.js'
+import { gitString, revisionFilePrefix } from './git.js'
 import type { PluginContext } from './types.js'
 import type {
-  Candidate, CandidateAttackPath, CandidateValidation, CoverageDocument, DraftFinding, DraftReviewState,
-  Finding, FindingStatus, ReviewItem, ScanDraftInput, ScanMode, ScanRecord, Severity, TriageEntry,
+  Candidate, CandidateAttackPath, CandidateValidation, CoverageDocument, CoverageSurface, DraftFinding, DraftReviewState,
+  Finding, FindingStatus, ReviewItem, ScanDraftInput, ScanMode, ScanRecord, Severity, SourceDelivery, TriageEntry,
 } from './types.js'
 import { FINDING_STATUSES, SEVERITIES } from './types.js'
 import { ScanStore, defaultStateDir } from './store.js'
 import { readEvidenceLine, readEvidenceLines, resolveTarget } from './target.js'
+import type { ResolvedTarget } from './target.js'
 import { assertArtifactContract } from './schema.js'
 import { canonicalProspectivePath, ensureDir, isWithin, joinWithin, newId, normalizeLine, nowIso, readFullText, readJson, renameFileAtomic, sanitizeRelative, sha256, truncate, writeFileAtomic, writeJsonAtomic } from './util.js'
 import { createExportValidator, writeSecureExport } from './secure-export.js'
 import { acquireStateLock } from './state-lock.js'
 import { WorkerRegistry } from './deep-worker.js'
 import type { WorkerSnapshot } from './deep-worker.js'
-import { sourceRootIdentity } from './secure-read.js'
+import { readWorkerSource, sourceRootIdentity } from './secure-read.js'
 
 export const FORMATS = ['sarif', 'json', 'csv', 'markdown'] as const
 export type ExportFormat = (typeof FORMATS)[number]
@@ -44,10 +45,13 @@ async function possibleGitMetadata(root: string): Promise<boolean> {
 interface SealOptions {
   signal?: AbortSignal
   withPublication?: (publish: () => Promise<void>) => Promise<void>
+  sourceDelivery?: SourceDelivery
+  workerSurfaces?: CoverageSurface[]
 }
 
 interface StoredDraft {
   boundRevisionEvidence?: true
+  coverageReferences?: true
   scanId: string
   recordedAt: string
   complete: boolean
@@ -524,6 +528,7 @@ export class SecurityService {
     assertArtifactContract('findings', buildFindingsDocument(scanId, deduped))
     const stored: StoredDraft = {
       ...(record.target.kind === 'git_diff' && !record.target.workingTree ? { boundRevisionEvidence: true } : {}),
+      ...(draft.reviewState.surfaces.some((surface) => surface.sourceEvidence !== undefined) ? { coverageReferences: true } : {}),
       scanId,
       recordedAt: nowIso(),
       complete: draft.complete === true,
@@ -853,6 +858,57 @@ export class SecurityService {
     return this.withScanLock(requiredStr(args, 'scanId'), () => this.completeScanUnlocked(args, options), args, options?.signal)
   }
 
+  private async verifyCoverageEvidence(target: ResolvedTarget, review: DraftReviewState, coverage: CoverageDocument, signal?: AbortSignal): Promise<void> {
+    type Reference = NonNullable<DraftReviewState['surfaces'][number]['sourceEvidence']>[number]
+    const byPath = new Map<string, { index: number; ref: Reference }[]>()
+    for (const [index, surface] of review.surfaces.entries()) {
+      if (surface.sourceEvidence !== undefined) coverage.surfaces[index]!.invariant = surface.invariant
+      for (const ref of surface.sourceEvidence ?? []) {
+        const entries = byPath.get(ref.path)
+        if (entries) entries.push({ index, ref })
+        else byPath.set(ref.path, [{ index, ref }])
+      }
+    }
+    if (byPath.size === 0) return
+    const revision = target.target.kind === 'git_diff' && !target.target.workingTree
+      ? target.target.headRevision ?? target.target.revision : undefined
+    const inventory = new Set(revision ? target.diffFiles?.map((file) => file.path) : target.files)
+    const root = revision ? undefined : sourceRootIdentity(target.target.rootPath)
+    const maxBytes = this.config.maxFileBytes
+    for (const [path, entries] of byPath) {
+      signal?.throwIfAborted()
+      const digest = target.fileDigests.get(path)
+      if (!inventory.has(path)) throw new Error('codex-security: coverage source evidence is outside the bound inventory: ' + path)
+      const bytes = revision ? await revisionFilePrefix(target.target.rootPath, revision, path, maxBytes + 1)
+        : root && digest ? readWorkerSource(root.path, path, maxBytes, root.identity, digest) : undefined
+      if (!bytes || bytes.length > maxBytes) throw new Error('codex-security: coverage source evidence is unavailable within the read limit: ' + path)
+      const source = bytes.toString('utf8')
+      if (!Buffer.from(source, 'utf8').equals(bytes)) throw new Error('codex-security: coverage source evidence is not UTF-8: ' + path)
+      const wanted = new Set<number>()
+      for (const { ref } of entries) {
+        for (let line = ref.startLine; line <= ref.endLine; line++) wanted.add(line)
+      }
+      const lastLine = Math.max(...wanted)
+      const lines = new Map<number, string>()
+      for (let line = 1, start = 0; line <= lastLine && start < source.length; line++) {
+        const newline = source.indexOf('\n', start)
+        const end = newline === -1 ? source.length : newline
+        if (wanted.has(line)) {
+          lines.set(line, source.slice(start, newline !== -1 && source[end - 1] === '\r' ? end - 1 : end))
+        }
+        start = newline === -1 ? source.length : newline + 1
+      }
+      for (const { index, ref } of entries) {
+        const { startLine, endLine } = ref
+        const excerpt = Array.from({ length: endLine - startLine + 1 }, (_, offset) => lines.get(startLine + offset)).join('\n')
+        if (!lines.has(endLine) || excerpt !== ref.excerpt) throw new Error('codex-security: coverage source evidence does not match the bound source: ' + path + ':' + startLine)
+        const surface = coverage.surfaces[index]!
+        surface.sourceEvidence ??= []
+        surface.sourceEvidence.push({ path, startLine, endLine, excerptSha256: sha256(excerpt) })
+      }
+    }
+  }
+
   private async completeScanUnlocked(args: Json, options?: SealOptions): Promise<Json> {
     options?.signal?.throwIfAborted()
     const scanId = requiredStr(args, 'scanId')
@@ -862,6 +918,8 @@ export class SecurityService {
     const draft = await readJson<StoredDraft>(join(dir, 'checkpoints', 'scan-draft.json'))
     if (!draft) throw new Error('codex-security: no draft recorded; call codex_security_record_scan_draft before completing the scan')
     if (!draft.complete) throw new Error('codex-security: draft is incomplete; record a complete draft before sealing')
+    const reviewState = draft.coverageReferences ? validateDraft(draft.input).reviewState : draft.input.reviewState ?? { surfaces: [] }
+    const evidencePaths = draft.coverageReferences ? new Set(reviewState.surfaces.flatMap((surface) => (surface.sourceEvidence ?? []).map((ref) => ref.path))) : undefined
     const currentTarget = await resolveTarget({
       targetPath: record.target.rootPath,
       includePaths: record.scope.includePaths,
@@ -870,6 +928,7 @@ export class SecurityService {
       workingTree: record.target.workingTree === true,
       maxFiles: this.config.maxFiles,
       maxFileBytes: this.config.maxFileBytes,
+      evidencePaths,
       signal: options?.signal,
     })
     options?.signal?.throwIfAborted()
@@ -879,7 +938,6 @@ export class SecurityService {
     }
     if (currentTarget.target.snapshotDigest !== record.target.snapshotDigest) throw new Error('codex-security: target changed after scan binding; start a new scan')
     let findings = sortedFindings(draft.findings ?? [])
-    const reviewState: DraftReviewState = draft.input.reviewState ?? { surfaces: [] }
     const warnings = [...record.warnings]
     let migratedDraftIds: { previous: string; current: string }[] | undefined
     const legacyIds = findings.some((finding) => finding.fingerprints.primary !== fingerprintFor(record.target.targetId, finding.ruleId, finding.identity.anchor, finding.identity.instance))
@@ -917,6 +975,10 @@ export class SecurityService {
       }
     }
     const coverage = buildCoverage(record, reviewState)
+    if (draft.coverageReferences) await this.verifyCoverageEvidence(currentTarget, reviewState, coverage, options?.signal)
+    if (options?.workerSurfaces) coverage.surfaces = options.workerSurfaces
+    if (options?.sourceDelivery) coverage.sourceDelivery = options.sourceDelivery
+    coverage.sourceCoverageVersion = 1
     const submittedScope = draft.input.scope ?? {}
     for (const field of ['summary', 'runtimeStatus', 'validationMode', 'context'] as const) {
       if (submittedScope[field] !== undefined && (typeof submittedScope[field] !== 'string' || !(submittedScope[field] as string).trim())) throw new Error('codex-security: scope ' + field + ' must be a non-empty string')

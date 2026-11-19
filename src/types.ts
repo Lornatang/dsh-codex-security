@@ -67,7 +67,8 @@ export interface Finding {
   [key: string]: unknown
 }
 
-export interface DraftSurface { id?: string; label: string; disposition: Disposition; receiptRefs?: string[]; riskArea?: string; notes?: string; [key: string]: unknown }
+export interface SourceReference { path: string; startLine: number; endLine: number }
+export interface DraftSurface { id?: string; label: string; disposition: Disposition; receiptRefs?: string[]; riskArea?: string; notes?: string; invariant?: string; sourceEvidence?: (SourceReference & { excerpt: string })[]; [key: string]: unknown }
 export interface DraftExclusion { pattern: string; reason: string; [key: string]: unknown }
 export interface DraftDeferred { id: string; reason: string; paths?: string[]; surfaceIds?: string[]; [key: string]: unknown }
 export interface DraftReviewState {
@@ -249,7 +250,8 @@ export interface ReviewItem {
 
 export interface TriageEntry { findingId: string; status: FindingStatus; note?: string; remediation?: string; updatedAt: string }
 
-export interface CoverageSurface { id: string; label: string; disposition: Disposition; receiptRefs: string[]; riskArea?: string; notes?: string }
+export interface SourceDelivery { deliveredFiles: number; eligibleFiles: number }
+export interface CoverageSurface { id: string; label: string; disposition: Disposition; receiptRefs: string[]; riskArea?: string; notes?: string; invariant?: string; sourceEvidence?: (SourceReference & { excerptSha256: string })[] }
 export interface CoverageDocument {
   documentType: 'codex-security.coverage'
   schemaVersion: '1.0'
@@ -257,6 +259,8 @@ export interface CoverageDocument {
   mode: string
   completeness?: 'complete' | 'partial' | 'unknown'
   inventoryStrategy: string
+  sourceDelivery?: SourceDelivery
+  sourceCoverageVersion?: 1
   includePaths: string[]
   excludePaths: string[]
   surfaces: CoverageSurface[]

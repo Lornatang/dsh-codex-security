@@ -24,6 +24,16 @@
     },
     "includePaths": { "type": "array", "items": { "type": "string" } },
     "excludePaths": { "type": "array", "items": { "type": "string" } },
+    "sourceCoverageVersion": { "const": 1 },
+    "sourceDelivery": {
+      "type": "object",
+      "properties": {
+        "deliveredFiles": { "type": "integer", "minimum": 0 },
+        "eligibleFiles": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["deliveredFiles", "eligibleFiles"],
+      "additionalProperties": false
+    },
     "surfaces": {
       "type": "array",
       "items": {
@@ -49,7 +59,23 @@
             }
           },
           "riskArea": { "type": "string", "minLength": 1 },
-          "notes": { "type": "string", "minLength": 1 }
+          "notes": { "type": "string", "minLength": 1 },
+          "invariant": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "sourceEvidence": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "startLine": { "type": "integer", "minimum": 1 },
+                "endLine": { "type": "integer", "minimum": 1 },
+                "excerptSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+              },
+              "required": ["path", "startLine", "endLine", "excerptSha256"],
+              "additionalProperties": false
+            }
+          }
         },
         "required": ["id", "label", "disposition", "receiptRefs"]
       }

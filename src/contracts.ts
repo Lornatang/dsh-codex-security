@@ -168,6 +168,7 @@ export function validateDraft(input: unknown): ScanDraftInput {
   if (!Array.isArray(reviewState.surfaces)) throw new Error('codex-security: draft.reviewState.surfaces must be an array')
   if (reviewState.completeness !== undefined && !['complete', 'partial', 'unknown'].includes(reviewState.completeness)) throw new Error('codex-security: invalid coverage completeness')
   const ids = new Set<string>()
+  let sourceReferences = 0
   for (const surface of reviewState.surfaces) {
     if (!surface || typeof surface.label !== 'string' || surface.label.trim().length === 0) throw new Error('codex-security: each coverage surface needs a non-empty label')
     if (!DISPOSITION_SET.has(String(surface.disposition))) throw new Error('codex-security: surface disposition must be one of ' + DISPOSITIONS.join(', '))
@@ -180,6 +181,27 @@ export function validateDraft(input: unknown): ScanDraftInput {
       for (const ref of surface.receiptRefs) {
         const value = String(ref)
         if (!value.startsWith('artifacts/') || value !== sanitizeRelative(value) || value.includes('\\')) throw new Error('codex-security: surface receiptRefs must point under artifacts/: ' + value)
+      }
+    }
+    if (surface.sourceEvidence !== undefined) {
+      if (typeof surface.id !== 'string' || !surface.id.trim() || typeof surface.invariant !== 'string' || !surface.invariant.trim() || surface.invariant.length > 1000) {
+        throw new Error('codex-security: a focused coverage unit needs a stable id and an invariant')
+      }
+      const evidence = surface.sourceEvidence
+      if (!Array.isArray(evidence) || evidence.length > 8) throw new Error('codex-security: coverage source evidence must contain at most 8 references per unit')
+      sourceReferences += evidence.length
+      if (sourceReferences > 256) throw new Error('codex-security: coverage source evidence must contain at most 256 references per draft')
+      if (surface.disposition !== 'needs_follow_up' && evidence.length === 0) throw new Error('codex-security: a closed coverage unit requires source evidence')
+      if (typeof surface.notes !== 'string' || !surface.notes.trim() || surface.notes.length > 2000) {
+        throw new Error('codex-security: a focused coverage unit needs notes explaining the conclusion or evidence gap')
+      }
+      for (const ref of evidence) {
+        if (!ref || typeof ref.path !== 'string' || !ref.path || ref.path.includes('\\') || sanitizeRelative(ref.path) !== ref.path ||
+          !Number.isSafeInteger(ref.startLine) || !Number.isSafeInteger(ref.endLine) || ref.startLine < 1 ||
+          ref.endLine < ref.startLine || ref.endLine - ref.startLine >= 40 ||
+          typeof ref.excerpt !== 'string' || !ref.excerpt.trim() || ref.excerpt.length > 8192) {
+          throw new Error('codex-security: invalid coverage source evidence')
+        }
       }
     }
   }
@@ -223,8 +245,9 @@ export function buildCoverage(scan: ScanRecord, reviewState: DraftReviewState, m
     if (!entry.id || !entry.reason || active.has(entry.id) || resolved.has(entry.id)) throw new Error('codex-security: invalid or duplicate resolved deferred work')
     resolved.add(entry.id)
   }
+  const { sourceDelivery: _untrustedDelivery, sourceCoverageVersion: _untrustedVersion, ...reported } = reviewState
   return {
-    ...reviewState,
+    ...reported,
     documentType: 'codex-security.coverage',
     schemaVersion: '1.0',
     scanId: scan.scanId,
@@ -245,8 +268,9 @@ function sanitizeSurfaces(surfaces: DraftSurface[]): CoverageSurface[] {
   return surfaces.map((surface, index) => {
     const disposition = String(surface.disposition) as Disposition
     if (!DISPOSITION_SET.has(disposition)) throw new Error('codex-security: invalid surface disposition ' + disposition)
+    const { sourceEvidence: _draftEvidence, invariant: _draftInvariant, sourceEvidenceVerified: _untrustedFlag, ...reported } = surface
     return {
-      ...surface,
+      ...reported,
       id: String(surface.id ?? 'surface-' + (index + 1)),
       label: String(surface.label),
       disposition,
@@ -294,8 +318,13 @@ export function renderReport(scan: ScanRecord, findings: Finding[], coverage: Co
   push('| Snapshot | ' + scan.target.snapshotDigest + ' |')
   push('| Scope | ' + scan.scope.includePaths.join(', ') + ' |')
   push('| Excluded | ' + (scan.scope.excludePaths.length > 0 ? scan.scope.excludePaths.join(', ') : '(none beyond defaults)') + ' |')
-  push('| Files inventoried | ' + scan.inventory.inspectedFiles + ' |')
-  push('| Coverage completeness | ' + (coverage.completeness ?? 'unknown') + ' |')
+  push('| Files enumerated | ' + scan.inventory.totalFiles + (scan.inventory.truncated ? ' (truncated)' : '') + ' |')
+  const verifiedCoverage = coverage.sourceCoverageVersion === 1
+  const delivery = verifiedCoverage ? coverage.sourceDelivery : undefined
+  push('| Files delivered to contributing workers | ' + (delivery ? delivery.deliveredFiles + ' of ' + delivery.eligibleFiles : 'unavailable') + ' |')
+  const evidencedUnits = verifiedCoverage ? coverage.surfaces.filter((surface) => Array.isArray(surface.sourceEvidence) && surface.sourceEvidence.length && surface.disposition !== 'needs_follow_up').length : 'unavailable'
+  push('| Unit records with verified source and a disposition | ' + evidencedUnits + ' |')
+  push('| Recorded coverage completeness | ' + (coverage.completeness ?? 'unknown') + ' |')
   push()
   push('## Executive summary')
   push()
@@ -352,9 +381,16 @@ export function renderReport(scan: ScanRecord, findings: Finding[], coverage: Co
   push()
   if (coverage.surfaces.length === 0) push('No coverage surfaces were recorded.')
   else {
-    push('| Surface | Disposition | Risk area | Receipts |')
-    push('| --- | --- | --- | --- |')
-    for (const surface of coverage.surfaces) push('| ' + surface.label + ' | ' + surface.disposition + ' | ' + (surface.riskArea ?? '') + ' | ' + surface.receiptRefs.join(', ') + ' |')
+    push('| Surface | Disposition | Risk area | Receipts | Verified source |')
+    push('| --- | --- | --- | --- | --- |')
+    for (const surface of coverage.surfaces) {
+      const references = verifiedCoverage && Array.isArray(surface.sourceEvidence) ? surface.sourceEvidence : []
+      const locations = references.map((ref) => (ref.path + ':' + ref.startLine + (ref.endLine === ref.startLine ? '' : '-' + ref.endLine)).replace(/\|/g, '\\|'))
+      push('| ' + surface.label + ' | ' + surface.disposition + ' | ' + (surface.riskArea ?? '') + ' | ' + surface.receiptRefs.join(', ') + ' | ' + locations.join(', ') + ' |')
+    }
+    for (const surface of coverage.surfaces) {
+      if (verifiedCoverage && typeof surface.invariant === 'string') push('- **' + surface.label + '** — ' + surface.invariant + (surface.notes ? ' (' + surface.notes + ')' : ''))
+    }
   }
   push()
   if (coverage.explicitExclusions.length > 0) {

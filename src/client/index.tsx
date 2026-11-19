@@ -51,9 +51,13 @@ interface Finding {
   locations?: { path?: string; startLine?: number }[]
   remediation?: string; status?: string; triage?: { status?: string; note?: string; remediation?: string }
 }
-interface CoverageSurface { id?: string; label?: string; disposition?: string; receiptRefs?: string[]; riskArea?: string; notes?: string }
+interface CoverageSurface {
+  id?: string; label?: string; disposition?: string; receiptRefs?: string[]; riskArea?: string; notes?: string; invariant?: string
+  sourceEvidence?: { path: string; startLine: number; endLine: number }[]
+}
 interface CoverageDocument {
   mode?: string; inventoryStrategy?: string; surfaces?: CoverageSurface[]
+  completeness?: string; sourceCoverageVersion?: number; sourceDelivery?: { deliveredFiles: number; eligibleFiles: number }
   explicitExclusions?: { pattern?: string; reason?: string }[]
   deferred?: { id?: string; reason?: string }[]
   openQuestions?: { question?: string }[]
@@ -327,12 +331,16 @@ function ScanDetailPanel(props: {
   const revision = target?.revision ?? target?.headRevision
   const scopeText = scope?.summary ?? ((scope?.includePaths?.length ?? 0) + ' include / ' + (scope?.excludePaths?.length ?? 0) + ' exclude paths')
   const inventoryText = typeof inventory?.totalFiles === 'number'
-    ? (inventory.inspectedFiles ?? 0) + ' of ' + inventory.totalFiles + ' files inspected' + (inventory.truncated ? ' · truncated' : '') : '—'
+    ? inventory.totalFiles + ' files enumerated' + (inventory.truncated ? ' · truncated' : '') : '—'
+  const verifiedCoverage = coverage?.sourceCoverageVersion === 1
+  const delivery = verifiedCoverage ? coverage?.sourceDelivery : undefined
+  const evidencedUnits = verifiedCoverage ? surfaces.filter((surface) => Array.isArray(surface.sourceEvidence) && surface.sourceEvidence.length && surface.disposition !== 'needs_follow_up').length : 'unavailable'
   const overview: { term: string; value: React.ReactNode }[] = [
     { term: 'Target', value: (target?.displayName ?? '—') + (target?.kind ? ' · ' + target.kind : '') + (target?.remote ? ' · ' + target.remote : '') },
     { term: 'Revision', value: <code className="dcs-code">{shortRevision(revision)}</code> },
     { term: 'Scope', value: scopeText },
     { term: 'Inventory', value: inventoryText },
+    { term: 'Source delivered to contributing workers', value: delivery ? delivery.deliveredFiles + ' of ' + delivery.eligibleFiles + ' eligible files' : 'Unavailable' },
     { term: 'Severity', value: <SeverityChips counts={counts} /> },
   ]
   if (scan.policy) overview.push({ term: 'Policy', value: (scan.policy.threshold ?? '—') + ' · ' + (scan.policy.status ?? 'unknown') + (typeof scan.policy.failing === 'number' ? ' · ' + scan.policy.failing + ' failing' : '') })
@@ -374,19 +382,21 @@ function ScanDetailPanel(props: {
         <FindingsTable scanId={scan.scanId} findings={findings} busyFindingId={busyFindingId} onTriage={onTriage} />
       </Panel>
       <Panel title="Coverage" meta={coverage?.mode ? 'mode: ' + coverage.mode : undefined}>
+        {coverage ? <p className="dcs-hint">Recorded coverage {coverage.completeness ?? 'unknown'} · Unit records with verified source and a disposition: {evidencedUnits}</p> : null}
         {surfaces.length === 0 ? (
           <p className="dcs-empty">No coverage surfaces recorded for this scan.</p>
         ) : (
           <div className="dcs-tableWrap">
             <table className="dcs-table">
-              <thead><tr><th scope="col">Surface</th><th scope="col">Disposition</th><th scope="col">Risk area</th><th scope="col">Notes</th></tr></thead>
+              <thead><tr><th scope="col">Surface</th><th scope="col">Disposition</th><th scope="col">Risk area</th><th scope="col">Notes</th><th scope="col">Verified source</th></tr></thead>
               <tbody>
                 {surfaces.map((surface, index) => (
                   <tr key={surface.id ?? 'surface-' + index}>
-                    <td><span className="dcs-surfaceLabel">{surface.label ?? surface.id ?? 'unnamed surface'}</span><code className="dcs-code dcs-surfaceId">{surface.id ?? ''}</code></td>
+                    <td><span className="dcs-surfaceLabel">{surface.label ?? surface.id ?? 'unnamed surface'}</span><code className="dcs-code dcs-surfaceId">{surface.id ?? ''}</code>{verifiedCoverage && typeof surface.invariant === 'string' ? <div>{surface.invariant}</div> : null}</td>
                     <td><Chip tone={toneOf(DISPOSITION_TONE, surface.disposition)}>{(surface.disposition ?? 'unknown').replace(/_/g, ' ')}</Chip></td>
                     <td>{surface.riskArea ?? '—'}</td>
                     <td>{surface.notes ?? '—'}{Array.isArray(surface.receiptRefs) && surface.receiptRefs.length > 0 ? ' · ' + surface.receiptRefs.length + ' receipt(s)' : ''}</td>
+                    <td>{verifiedCoverage && Array.isArray(surface.sourceEvidence) && surface.sourceEvidence.length ? surface.sourceEvidence.map((ref) => ref.path + ':' + ref.startLine + (ref.endLine === ref.startLine ? '' : '-' + ref.endLine)).join(', ') : '—'}</td>
                   </tr>
                 ))}
               </tbody>
