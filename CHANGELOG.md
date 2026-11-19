@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.13] - 2026-11-19
+
+- Anchor revision-only scan evidence to the bound Git revision.
+- Publish scan artifacts only once the scan is completed, and write Deep worker sidecars only when the worker result changes.
+
 ## [0.1.12] - 2026-11-19
 
 - Read chunked evidence from the already verified worker text cache instead of re-reading and hashing the whole file per chunk.
