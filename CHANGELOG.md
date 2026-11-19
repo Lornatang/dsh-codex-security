@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.14] - 2026-11-19
+
+- Separate enumerated files, source delivered to contributing workers, and focused review records in the workbench and reports.
+- Verify focused review references against the bound snapshot before sealing, including committed lines in revision-only diffs.
+
 ## [0.1.13] - 2026-11-19
 
 - Anchor revision-only scan evidence to the bound Git revision.

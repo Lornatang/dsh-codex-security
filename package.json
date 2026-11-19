@@ -1,6 +1,6 @@
 {
   "name": "@lornatang/dsh-codex-security",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Agent-native security review workbench for DeepSeek Harness, modeled on OpenAI codex-security: sealed scans, findings contract, deep-scan orchestration and SARIF/JSON export.",
   "type": "module",
   "license": "Apache-2.0",

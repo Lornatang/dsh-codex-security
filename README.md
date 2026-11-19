@@ -34,7 +34,7 @@ dsh plugin --profile <name> add @lornatang/dsh-codex-security
 dsh plugin --profile <name> remove @lornatang/dsh-codex-security
 ```
 
-For the GitHub 0.1.13 release, use `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-codex-security/releases/download/v0.1.13/lornatang-dsh-codex-security-0.1.13.tgz`.
+For the GitHub 0.1.14 release, use `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-codex-security/releases/download/v0.1.14/lornatang-dsh-codex-security-0.1.14.tgz`.
 
 The `add` command composes the layer into the profile: the profile's `cordis.patch.yml` gains an insert entry, row id `codex-security`, whose `config` starts from the bundle defaults `maxFiles: 5000`, `maxFileBytes: 1048576`, and `defaultMode: standard`; every other field takes its default from `src/config.ts`. The package manifest points `dsh.bundle.patch` at that document. The `remove` command deletes the row and leaves scans already written under the profile data directory untouched.
 

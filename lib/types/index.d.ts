@@ -6,7 +6,7 @@ import type { PluginContext } from './types.js';
 export declare const name = "codex-security";
 export declare const inject: string[];
 export { Config };
-export declare const version = "0.1.13";
+export declare const version = "0.1.14";
 export { SecurityService };
 export type { ConfigType };
 export declare function loadBundledSkills(packageRoot: string): SkillRegistration[];
