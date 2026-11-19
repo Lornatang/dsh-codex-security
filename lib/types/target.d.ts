@@ -30,18 +30,22 @@ export interface DiffSnapshot {
 }
 export declare function resolveDiff(rootPath: string, options: {
     diffTarget?: string;
+    head?: string;
     staged?: boolean;
     workingTree?: boolean;
+    signal?: AbortSignal;
 }): Promise<DiffSnapshot>;
+type EvidenceSource = string | Pick<TargetInfo, 'rootPath' | 'kind' | 'workingTree' | 'revision' | 'headRevision'>;
 /** Read one source line for anchor derivation without trusting it as instructions. */
-export declare function readEvidenceLine(rootPath: string, path: string, line: number, maxBytes: number): Promise<string | undefined>;
+export declare function readEvidenceLine(source: EvidenceSource, path: string, line: number, maxBytes: number): Promise<string | undefined>;
 /**
  * Read many evidence lines with one hardened open per source file. The old
  * per-line reader repeated the lstat/open/realpath verification and re-read the
  * file prefix for every requested line, so a draft citing several lines of one
  * file paid that cost repeatedly.
  */
-export declare function readEvidenceLines(rootPath: string, requests: {
+export declare function readEvidenceLines(source: EvidenceSource, requests: {
     path: string;
     line: number;
 }[], maxBytes: number): Promise<Map<string, string>>;
+export {};

@@ -13,6 +13,7 @@ import { resolveTarget } from '../lib/target.js'
 import { createSecurityTools } from '../lib/tools.js'
 import { ScanStore } from '../lib/store.js'
 import { TOOL_NAMES, VERSION } from '../lib/constants.js'
+import { normalizeFinding } from '../lib/contracts.js'
 
 const options = { maxFiles: 100, maxFileBytes: 1024 }
 const draft = (findings = [], complete = true, surfaces = [{ label: 'source', disposition: 'no_issue_found' }]) => ({
@@ -577,4 +578,93 @@ test('published documentation tracks the registered tool surface', async () => {
   assert.ok(pkg.files.includes('examples'))
   assert.ok(pkg.files.includes('README.zh.md'))
   await access(new URL('README.zh.md', root))
+})
+
+test('revision-only scan derives candidate and finding anchors from the bound commit', async () => {
+  const f = await fixture(true)
+  const candidate = { ruleId: 'demo/annotation', title: 'Annotation', severity: 'informational', path: 'src/app.js' }
+  const annotation = {
+    ...finding, ruleId: candidate.ruleId, title: candidate.title, summary: 'Track a source annotation.',
+    severity: { level: candidate.severity }, remediation: 'Review the annotation.',
+  }
+  const lineHash = (line) => createHash('sha256').update(line).digest('hex').slice(0, 12)
+  try {
+    await writeFile(join(f.target, candidate.path), 'const label = "committed"\n' + ' '.repeat(256 * 1024) + '\ntrailing text\n')
+    f.runGit('rm', 'other/other.js')
+    f.runGit('add', candidate.path)
+    f.runGit('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'snapshot')
+
+    await writeFile(join(f.target, candidate.path), 'const label = "local"\n')
+    await mkdir(join(f.target, 'other'), { recursive: true })
+    await writeFile(join(f.target, 'other/other.js'), 'const label = "recreated"\n')
+    const { scanId } = await f.service.startScan({ targetPath: f.target, diffTarget: 'HEAD^' }, 'standard')
+    const worktree = await f.service.startScan({ targetPath: f.target, workingTree: true }, 'standard')
+    const worktreeDraft = await f.service.recordScanDraft({ scanId: worktree.scanId, ...draft([annotation]) })
+    assert.ok(worktreeDraft.findings[0].anchor.endsWith('/' + lineHash('const label = "local"')))
+
+    f.runGit('add', candidate.path)
+    f.runGit('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'advance-head')
+    await rm(join(f.target, candidate.path))
+    const candidates = await f.service.recordDiscoveryCandidates({ scanId, candidates: [candidate, { ...candidate, path: 'other/other.js' }] })
+    assert.ok(candidates.candidates[0].anchor.endsWith('/' + lineHash('const label = "committed"')))
+    assert.ok(candidates.candidates[1].anchor.endsWith('/anchor'))
+    const pastReadLimit = { ...annotation, locations: [{ path: candidate.path, startLine: 3 }] }
+    const saved = await f.service.recordScanDraft({ scanId, ...draft([annotation, pastReadLimit]) })
+    assert.equal(saved.findings.find((entry) => entry.startLine === 1).anchor, candidates.candidates[0].anchor)
+    assert.ok(saved.findings.find((entry) => entry.startLine === 3).anchor.endsWith('/anchor'))
+  } finally { await f.cleanup() }
+})
+
+test('an uncompleted scan hides files left by an interrupted legacy seal', async () => {
+  const f = await fixture()
+  try {
+    const { scanId } = await f.service.startScan({ targetPath: f.target }, 'standard')
+    const { dir } = await f.service.store.get(scanId)
+    await f.service.saveArtifact({ scanId, path: 'artifacts/notes.txt', content: 'A draft note' })
+    await writeFile(join(dir, 'findings.json'), JSON.stringify({ findings: [{ findingId: 'interrupted' }] }))
+    await writeFile(join(dir, 'coverage.json'), '{}')
+    await writeFile(join(dir, 'scan-manifest.json'), JSON.stringify({ scan: { status: 'completed' } }))
+    await writeFile(join(dir, 'report.md'), 'Interrupted report')
+    await f.service.cancelScan({ scanId })
+    const result = await f.service.getScan({ scanId })
+    assert.equal(result.scan.status, 'canceled')
+    assert.deepEqual(result.findings, [])
+    assert.equal(result.coverage, null)
+    assert.equal(result.manifest, null)
+    assert.deepEqual((await f.service.listFindings({ scanId })).findings, [])
+    await assert.rejects(f.service.readArtifact({ scanId, path: 'report.md' }), /artifact not found/)
+    assert.equal((await f.service.readArtifact({ scanId, path: 'artifacts/notes.txt' })).content, 'A draft note')
+  } finally { await f.cleanup() }
+})
+
+
+test('a pre-update revision draft with a worktree-derived anchor must be recorded again', async () => {
+  const f = await fixture(true)
+  const annotation = {
+    ...finding, ruleId: 'demo/annotation', title: 'Annotation', summary: 'Track a source annotation.',
+    severity: { level: 'informational' }, remediation: 'Review the annotation.',
+  }
+  try {
+    const path = 'src/app.js'
+    await writeFile(join(f.target, path), 'const label = "committed"\n')
+    f.runGit('add', path)
+    f.runGit('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'snapshot')
+    const { scanId } = await f.service.startScan({ targetPath: f.target, diffTarget: 'HEAD^' }, 'standard')
+    const { dir, record } = await f.service.store.get(scanId)
+    const phase = await f.service.prepareReviewItems({ scanId })
+    for (const item of phase.items) await f.service.updateReviewItem({ scanId, reviewId: item.reviewId, status: 'reviewed' })
+    await f.service.recordScanDraft({ scanId, ...draft([annotation]) })
+    const checkpoint = join(dir, 'checkpoints', 'scan-draft.json')
+    const stored = JSON.parse(await readFile(checkpoint, 'utf8'))
+    delete stored.boundRevisionEvidence
+    stored.findings = [normalizeFinding(scanId, annotation, {
+      rootPath: f.target, targetId: record.target.targetId,
+      evidenceLines: new Map([[path + ':1', 'const label = "local"']]),
+    })]
+    await writeFile(checkpoint, JSON.stringify(stored))
+
+    await assert.rejects(f.service.completeScan({ scanId }), /record a corrected draft/)
+    await f.service.recordScanDraft({ scanId, ...draft([annotation]) })
+    assert.equal((await f.service.completeScan({ scanId })).status, 'completed')
+  } finally { await f.cleanup() }
 })

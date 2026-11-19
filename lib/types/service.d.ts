@@ -4,6 +4,10 @@ import { ScanStore } from './store.js';
 import type { WorkerSnapshot } from './deep-worker.js';
 export declare const FORMATS: readonly ["sarif", "json", "csv", "markdown"];
 export type ExportFormat = (typeof FORMATS)[number];
+interface SealOptions {
+    signal?: AbortSignal;
+    withPublication?: (publish: () => Promise<void>) => Promise<void>;
+}
 type Json = Record<string, unknown>;
 export interface SecurityServiceOptions {
     config?: Partial<Config>;
@@ -60,9 +64,7 @@ export declare class SecurityService {
     saveArtifact(args: Json): Promise<Json>;
     private saveArtifactUnlocked;
     readArtifact(args: Json): Promise<Json>;
-    completeScan(args: Json, options?: {
-        signal?: AbortSignal;
-    }): Promise<Json>;
+    completeScan(args: Json, options?: SealOptions): Promise<Json>;
     private completeScanUnlocked;
     failScan(args: Json): Promise<Json>;
     private failScanUnlocked;

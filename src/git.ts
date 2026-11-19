@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
@@ -73,23 +73,23 @@ export async function trackedFiles(root: string, signal?: AbortSignal): Promise<
 
 export interface ChangedFile { status: string; path: string; oldPath?: string }
 
-export async function changedFiles(root: string, options: { base?: string; staged?: boolean; workingTree?: boolean }): Promise<ChangedFile[]> {
-  const args: string[] = ['diff', '--name-status', '-z', '--find-renames']
+export async function changedFiles(root: string, options: { base?: string; head?: string; staged?: boolean; workingTree?: boolean; signal?: AbortSignal }): Promise<ChangedFile[]> {
+  const args: string[] = ['--no-replace-objects', 'diff', '--name-status', '-z', '--find-renames']
   if (options.staged) args.push('--cached')
   if (options.base) {
-    const resolved = await resolveRevision(root, options.base)
+    const resolved = await resolveRevision(root, options.base, options.signal)
     if (!resolved) throw new Error('codex-security: invalid diff base: ' + options.base)
     if (options.workingTree) {
-      const mergeBase = await gitString(root, ['merge-base', resolved, 'HEAD'])
+      const mergeBase = await gitString(root, ['--no-replace-objects', 'merge-base', resolved, options.head ?? 'HEAD'], undefined, options.signal)
       if (!mergeBase) throw new Error('codex-security: cannot resolve merge base: ' + options.base)
       args.push(mergeBase)
     } else {
-      args.push(resolved + '...HEAD')
+      args.push(resolved + '...' + (options.head ?? 'HEAD'))
     }
   } else if (!options.staged) {
-    args.push('HEAD')
+    args.push(options.head ?? 'HEAD')
   }
-  const result = await git(root, args)
+  const result = await git(root, [...args, '--'], undefined, options.signal)
   if (!result.ok) throw new Error('codex-security: git diff failed: ' + result.stderr.trim())
   const parts = result.stdout.split('\u0000').filter(Boolean)
   const files: ChangedFile[] = []
@@ -108,11 +108,46 @@ export async function changedFiles(root: string, options: { base?: string; stage
   }
   if (options.workingTree && !options.staged) {
     const seen = new Set(files.map((file) => file.path))
-    for (const entry of await statusEntries(root)) {
+    for (const entry of await statusEntries(root, options.signal)) {
       if (entry.code === '??' && !seen.has(entry.path)) files.push({ status: 'A', path: entry.path })
     }
   }
   return files
+}
+
+/** Read a bounded prefix of a regular file from the exact commit. */
+export async function revisionFilePrefix(root: string, revision: string, path: string, limit: number): Promise<Buffer | undefined> {
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(revision) || path.includes('\0') || !Number.isSafeInteger(limit) || limit <= 0) return undefined
+  const entry = await git(root, ['--no-replace-objects', '--literal-pathspecs', 'ls-tree', '-z', '--full-tree', revision, '--', path])
+  const match = /^100(?:644|755) blob ([a-f0-9]{40}|[a-f0-9]{64})\t/.exec(entry.stdout)
+  if (!entry.ok || !match || entry.stdout.slice(match[0].length) !== path + '\0') return undefined
+
+  const child = spawn('git', ['--no-replace-objects', 'cat-file', 'blob', match[1]!], {
+    cwd: root, timeout: 60000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  const exited = new Promise<number | null>((resolve) => {
+    child.once('error', () => resolve(null))
+    child.once('close', resolve)
+  })
+  const chunks: Buffer[] = []
+  let size = 0
+  try {
+    for await (const chunk of child.stdout) {
+      const prefix = (chunk as Buffer).subarray(0, limit - size)
+      chunks.push(prefix)
+      size += prefix.length
+      if (size === limit) {
+        child.kill()
+        break
+      }
+    }
+    const code = await exited
+    return size === limit || code === 0 ? Buffer.concat(chunks, size) : undefined
+  } catch {
+    child.kill()
+    await exited
+    return undefined
+  }
 }
 
 export async function fileDigest(path: string, signal?: AbortSignal): Promise<string | undefined> {

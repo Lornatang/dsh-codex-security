@@ -7,7 +7,8 @@ import { acquireStateLock } from './state-lock.js'
 export interface ScanIndex { version: 1; scans: Record<string, ScanSummary & { repoKey: string }> }
 
 /** Files owned by the seal step; agents cannot overwrite them through save_artifact. */
-const SEALED_FILES = new Set(['scan.json', 'findings.json', 'coverage.json', 'scan-manifest.json', 'sarif.json', 'report.md', 'threat-model.md', 'threatmodel.md'])
+const FINAL_ARTIFACTS = new Set(['findings.json', 'coverage.json', 'scan-manifest.json', 'sarif.json', 'report.md', 'threat-model.md'])
+const SEALED_FILES = new Set([...FINAL_ARTIFACTS, 'scan.json', 'threatmodel.md'])
 const INTERNAL_FILES = new Set([...SEALED_FILES, 'candidates.json', 'validations.json', 'attack-paths.json', 'review-items.json', 'triage.json'])
 
 /**
@@ -222,7 +223,10 @@ export class ScanStore {
     return undefined
   }
 
-  async update(scanId: string, mutate: (record: ScanRecord) => void): Promise<ScanRecord> {
+  async update(scanId: string, mutate: (record: ScanRecord) => void, options: {
+    signal?: AbortSignal
+    publish?: (commit: () => Promise<void>) => Promise<void>
+  } = {}): Promise<ScanRecord> {
     return this.serialize(async () => {
       const found = await this.get(scanId)
       if (!found) throw new Error('codex-security: scan not found: ' + scanId)
@@ -230,12 +234,14 @@ export class ScanStore {
       mutate(record)
       record.updatedAt = nowIso()
       record.progress.updatedAt = record.updatedAt
-      await this.writeRecord(record)
+      const commit = () => this.writeRecord(record)
+      if (options.publish) await options.publish(commit)
+      else await commit()
       const index = await this.loadIndex()
       index.scans[record.scanId] = { ...summarize(record), repoKey: record.repoKey }
       await this.saveIndex(index)
       return record
-    })
+    }, options.signal)
   }
 
   async writeScanFile(scanId: string, name: string, value: unknown): Promise<string> {
@@ -249,7 +255,9 @@ export class ScanStore {
   async readScanFile<T>(scanId: string, name: string): Promise<T | undefined> {
     const found = await this.get(scanId)
     if (!found) throw new Error('codex-security: scan not found: ' + scanId)
-    return readJson<T>(joinWithin(found.dir, name))
+    const clean = sanitizeRelative(name)
+    if (found.record.status !== 'completed' && FINAL_ARTIFACTS.has(guardName(clean))) return undefined
+    return readJson<T>(joinWithin(found.dir, clean))
   }
 
   async list(): Promise<ScanSummary[]> {
@@ -278,6 +286,10 @@ export class ScanStore {
     const found = await this.get(scanId)
     if (!found) throw new Error('codex-security: scan not found: ' + scanId)
     const clean = sanitizeRelative(relativePath)
+    const guarded = guardName(clean)
+    if (guarded.startsWith('checkpoints/seal-') || (found.record.status !== 'completed' && FINAL_ARTIFACTS.has(guarded))) {
+      throw new Error('codex-security: artifact not found: ' + relativePath)
+    }
     const target = joinWithin(found.dir, clean)
     const content = await readText(target, limit)
     if (content === undefined) throw new Error('codex-security: artifact not found: ' + relativePath)

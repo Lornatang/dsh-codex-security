@@ -489,7 +489,11 @@ function Workbench() {
     return () => { active = false; controller.abort() }
   }, [selectedId, reloadToken])
   const refresh = React.useCallback(() => { setActionError(null); setReloadToken(token => token + 1) }, [])
-  const selectScan = React.useCallback((scanId: string) => { setDetail(null); setSelectedId(scanId) }, [])
+  const selectScan = React.useCallback((scanId: string) => {
+    if (scanId === selectedId) return
+    setDetail(null)
+    setSelectedId(scanId)
+  }, [selectedId])
   const handleTriage = React.useCallback((scanId: string, findingId: string, nextStatus: FindingStatus) => {
     setBusyFindingId(findingId)
     setActionError(null)

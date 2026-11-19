@@ -9,7 +9,7 @@ import { acquireStateLock } from './state-lock.js'
 import { resolveTarget } from './target.js'
 import { sourceRootIdentity } from './secure-read.js'
 import type { CoverageDocument, DeepBudget, DraftFinding, DraftReviewState, Finding, ScanRecord } from './types.js'
-import { ensureDir, newId, nowIso, readJson, sha256, writeJsonAtomic } from './util.js'
+import { newId, nowIso, readJson, sha256, writeJsonAtomic } from './util.js'
 
 type Json = Record<string, unknown>
 export interface DeepActor { agent: { id: string }; signal?: AbortSignal }
@@ -36,6 +36,7 @@ interface DeepRun {
   coverage?: CoverageDocument
   error?: string
   newCount?: number
+  hasPayload?: true
 }
 interface DeepJournal {
   version: 1
@@ -54,6 +55,8 @@ interface DeepJournal {
   stopReason?: string
   error?: string
 }
+
+const RUN_PAYLOAD_KEYS = ['draft', 'receipts', 'findings', 'coverage', 'reviewState'] as const
 
 const OUTPUT_SCHEMA = {
   type: 'object', properties: { draftJson: { type: 'string', description: 'JSON object with findings and reviewState.' } },
@@ -110,42 +113,26 @@ export class DeepCoordinator {
   private cancelPath(scanId: string): string { return join(this.service.store.stateDir, 'deep', scanId + '.cancel.json') }
   private runSidecarDir(scanId: string): string { return join(this.service.store.stateDir, 'deep', scanId + '.runs') }
   private runSidecarPath(scanId: string, childId: string): string { return join(this.runSidecarDir(scanId), childId + '.json') }
-  private readonly sidecarHashes = new Map<string, string>()
+  private readonly dirtyPayloads = new WeakSet<DeepRun>()
 
-  /** Heavy per-worker results that no longer belong in the transition journal. */
-  private runPayload(run: DeepRun): Json {
-    const payload: Json = {}
-    if (run.draft !== undefined) payload['draft'] = run.draft as Json
-    if (run.receipts !== undefined) payload['receipts'] = run.receipts as unknown as Json
-    if (run.findings !== undefined) payload['findings'] = run.findings as unknown as Json
-    if (run.coverage !== undefined) payload['coverage'] = run.coverage as unknown as Json
-    if (run.reviewState !== undefined) payload['reviewState'] = run.reviewState as unknown as Json
-    return payload
-  }
-
-  /**
-   * Journal transitions are written frequently. Keep only light run metadata in
-   * the journal and offload each worker's findings/coverage/receipts to a
-   * per-worker sidecar, written only when its payload actually changed.
-   */
   private async save(journal: DeepJournal): Promise<void> {
-    if (journal.runs.some((run) => Object.keys(this.runPayload(run)).length > 0)) await ensureDir(this.runSidecarDir(journal.scanId))
     for (const run of journal.runs) {
+      if (!this.dirtyPayloads.has(run)) continue
       if (!/^dcs_[a-f0-9]{24}$/.test(run.childId)) throw new Error('codex-security: invalid Deep worker id')
-      const payload = this.runPayload(run)
-      if (Object.keys(payload).length === 0) continue
-      const text = JSON.stringify(payload)
-      const digest = sha256(text)
-      const cacheKey = journal.scanId + '\u0000' + run.childId
-      if (this.sidecarHashes.get(cacheKey) === digest) continue
+      const payload: Json = {}
+      for (const key of RUN_PAYLOAD_KEYS) if (run[key] !== undefined) payload[key] = run[key]
+      // A transition may reference the worker output only after the sidecar
+      // is on disk. An interrupted write leaves the prior transition replayable.
       await writeJsonAtomic(this.runSidecarPath(journal.scanId, run.childId), payload)
-      this.sidecarHashes.set(cacheKey, digest)
+      run.hasPayload = true
+      this.dirtyPayloads.delete(run)
     }
     const light: DeepJournal = { ...journal, runs: journal.runs.map((run) => ({
       number: run.number, childId: run.childId, scanId: run.scanId, state: run.state,
       ...(run.complete !== undefined ? { complete: run.complete } : {}),
       ...(run.error ? { error: run.error } : {}),
       ...(run.newCount !== undefined ? { newCount: run.newCount } : {}),
+      ...(run.hasPayload ? { hasPayload: run.hasPayload } : {}),
     })) }
     await writeJsonAtomic(this.journalPath(journal.scanId), light)
   }
@@ -154,17 +141,33 @@ export class DeepCoordinator {
     if (!/^cs_[a-f0-9]{24}$/.test(scanId)) throw new Error('codex-security: invalid Deep scan id')
     const journal = await readJson<DeepJournal>(this.journalPath(scanId))
     if (!journal || journal.version !== 1 || journal.scanId !== scanId) throw new Error('codex-security: Deep scan journal not found')
-    for (const run of journal.runs) {
-      if (!run || !/^dcs_[a-f0-9]{24}$/.test(run.childId)) continue
-      if (run.draft !== undefined && run.receipts !== undefined && run.findings !== undefined) continue
-      const payload = await readJson<Json>(this.runSidecarPath(scanId, run.childId)).catch(() => undefined)
-      if (!payload || typeof payload !== 'object') continue
-      for (const key of ['draft', 'receipts', 'findings', 'coverage', 'reviewState'] as const) {
-        if (run[key] === undefined && payload[key] !== undefined) (run as unknown as Json)[key] = payload[key]
-      }
-    }
     return journal
   }
+
+  private async restoreRunPayloads(journal: DeepJournal, inlineOnly = false): Promise<void> {
+    for (const run of journal.runs) {
+      const inline = RUN_PAYLOAD_KEYS.some((key) => run[key] !== undefined)
+      // A sidecar written before a crash is uncommitted if its run never
+      // advanced past 'started' in the journal.
+      if (!inline && (inlineOnly || (!run.hasPayload && (run.state === 'started' || run.state === 'abandoned')))) continue
+      if (!/^dcs_[a-f0-9]{24}$/.test(run.childId)) throw new Error('codex-security: invalid Deep worker id')
+      const payload = await readJson<Json>(this.runSidecarPath(journal.scanId, run.childId))
+      if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        for (const key of RUN_PAYLOAD_KEYS) {
+          if (run[key] === undefined && payload[key] !== undefined) (run as unknown as Json)[key] = payload[key]
+        }
+        run.hasPayload = true
+      } else if (run.hasPayload && !inline) {
+        throw new Error('codex-security: Deep worker payload is missing: ' + run.childId)
+      }
+      if (!inlineOnly && !run.error && (
+        (run.state === 'result' && (run.draft === undefined || !Array.isArray(run.receipts))) ||
+        (run.state === 'processed' && (!Array.isArray(run.findings) || !run.coverage))
+      )) throw new Error('codex-security: Deep worker payload is incomplete: ' + run.childId)
+      if (inline) this.dirtyPayloads.add(run)
+    }
+  }
+
   private authorize(journal: DeepJournal, actor: DeepActor, claim?: unknown): void {
     authorizeJournal(journal, actor, claim)
   }
@@ -225,6 +228,7 @@ export class DeepCoordinator {
       journal = await this.read(scanId)
       this.authorize(journal, actor, args['recoveryClaim'])
       if (journal.status !== 'running' && journal.status !== 'initializing') throw new Error('codex-security: Deep scan is already ' + journal.status)
+      await this.restoreRunPayloads(journal)
       this.launch(journal, actor, release)
       started = true
       return { ok: true, scanId, status: 'running', resumed: true }
@@ -249,7 +253,11 @@ export class DeepCoordinator {
     } finally { releaseTransition() }
     try {
       const release = await acquireStateLock(this.lockPath(scanId), { timeoutMs: 0 })
-      try { await this.cancelOwned(await this.read(scanId)) } finally { release() }
+      try {
+        const journal = await this.read(scanId)
+        await this.restoreRunPayloads(journal, true)
+        await this.cancelOwned(journal)
+      } finally { release() }
     } catch (error) {
       if (!errorText(error).includes('timed out waiting for the state lock')) throw error
     }
@@ -385,11 +393,13 @@ export class DeepCoordinator {
     }
   }
 
-  private async processResult(journal: DeepJournal, run: DeepRun, signal: AbortSignal): Promise<void> {
+  private async processResult(journal: DeepJournal, run: DeepRun, controller: AbortController): Promise<void> {
+    const { signal } = controller
     signal.throwIfAborted()
     if (run.error || !run.draft || !run.receipts) { run.error ??= 'worker returned no complete result'; run.state = 'processed'; return }
     const snapshot = journal.snapshot!
     const draft = validateDraft(run.draft)
+    this.dirtyPayloads.add(run)
     run.reviewState = draft.reviewState
     const receipts = new Set(run.receipts)
     for (const finding of draft.findings) {
@@ -422,7 +432,17 @@ export class DeepCoordinator {
       await this.managed(childDraft, () => this.service.recordScanDraft(childDraft, { workerSnapshot: snapshot, signal }))
       const completeArgs = { scanId: run.scanId }
       signal.throwIfAborted()
-      await this.managed(completeArgs, () => this.service.completeScan(completeArgs, { signal }))
+      await this.managed(completeArgs, () => this.service.completeScan(completeArgs, {
+        signal,
+        withPublication: async (publish) => {
+          const release = await acquireStateLock(this.transitionPath(journal.scanId), { signal })
+          try {
+            if (await readJson(this.cancelPath(journal.scanId))) controller.abort(new Error('Deep scan canceled'))
+            signal.throwIfAborted()
+            await publish()
+          } finally { release() }
+        },
+      }))
     } else if (child.record.status !== 'completed') throw new Error('codex-security: worker child scan is ' + child.record.status)
     run.findings = await this.service.store.readFindings(run.scanId)
     run.coverage = await this.service.store.readScanFile<CoverageDocument>(run.scanId, 'coverage.json')
@@ -554,7 +574,7 @@ export class DeepCoordinator {
       for (const run of journal.runs) {
         if (run.state === 'started') { run.state = 'abandoned'; run.error = 'Worker was interrupted when the previous coordinator exited.' }
         if (run.state === 'result') {
-          try { await this.processResult(journal, run, controller.signal) } catch (error) { await this.processFailure(journal, run, error, controller) }
+          try { await this.processResult(journal, run, controller) } catch (error) { await this.processFailure(journal, run, error, controller) }
         }
       }
       this.merge(journal)
@@ -574,9 +594,10 @@ export class DeepCoordinator {
         const next = inflight.shift()!
         const result = await next.result
         Object.assign(next.run, result)
+        if (result.draft !== undefined) this.dirtyPayloads.add(next.run)
         next.run.state = 'result'
         await this.save(journal)
-        try { await this.processResult(journal, next.run, controller.signal) } catch (error) { await this.processFailure(journal, next.run, error, controller) }
+        try { await this.processResult(journal, next.run, controller) } catch (error) { await this.processFailure(journal, next.run, error, controller) }
         this.merge(journal)
         this.updateNoNew(journal)
         await this.save(journal)

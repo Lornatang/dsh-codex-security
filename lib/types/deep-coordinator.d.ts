@@ -44,16 +44,10 @@ export declare class DeepCoordinator {
     private cancelPath;
     private runSidecarDir;
     private runSidecarPath;
-    private readonly sidecarHashes;
-    /** Heavy per-worker results that no longer belong in the transition journal. */
-    private runPayload;
-    /**
-     * Journal transitions are written frequently. Keep only light run metadata in
-     * the journal and offload each worker's findings/coverage/receipts to a
-     * per-worker sidecar, written only when its payload actually changed.
-     */
+    private readonly dirtyPayloads;
     private save;
     private read;
+    private restoreRunPayloads;
     private authorize;
     start(args: Json, actor: DeepActor): Promise<Json>;
     resume(args: Json, actor: DeepActor): Promise<Json>;

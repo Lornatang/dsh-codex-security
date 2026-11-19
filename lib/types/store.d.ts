@@ -47,7 +47,10 @@ export declare class ScanStore {
         record: ScanRecord;
         dir: string;
     } | undefined>;
-    update(scanId: string, mutate: (record: ScanRecord) => void): Promise<ScanRecord>;
+    update(scanId: string, mutate: (record: ScanRecord) => void, options?: {
+        signal?: AbortSignal;
+        publish?: (commit: () => Promise<void>) => Promise<void>;
+    }): Promise<ScanRecord>;
     writeScanFile(scanId: string, name: string, value: unknown): Promise<string>;
     readScanFile<T>(scanId: string, name: string): Promise<T | undefined>;
     list(): Promise<ScanSummary[]>;

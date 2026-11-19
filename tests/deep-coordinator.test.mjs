@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -27,7 +27,8 @@ async function fixture(behavior = {}) {
       stats.peak = Math.max(stats.peak, stats.active)
       const result = (async () => {
         try {
-          await new Promise((resolve, reject) => {
+          if (behavior.waitForWorker) await behavior.waitForWorker(run)
+          else await new Promise((resolve, reject) => {
             const timer = setTimeout(resolve, behavior.delay ?? 30)
             signal.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason) }, { once: true })
           })
@@ -48,8 +49,12 @@ async function fixture(behavior = {}) {
   return { root, target, service, registry, coordinator, stats, cleanup: () => rm(root, { recursive: true, force: true }) }
 }
 
-test('automatic Deep bounds parallelism and attempts, then seals independently complete reviews', async () => {
-  const f = await fixture()
+test('automatic Deep bounds parallelism and attempts, then seals independently complete reviews', { timeout: 60000 }, async () => {
+  const secondWorker = Promise.withResolvers()
+  const f = await fixture({ waitForWorker: (run) => {
+    if (run === 2) secondWorker.resolve()
+    if (run === 1) return secondWorker.promise
+  } })
   try {
     const started = await f.coordinator.start({ targetPath: f.target, workers: 2, maxDiscoveryRuns: 3, stopAfterNoNew: 20 }, { agent: { id: 'owner' } })
     assert.match(started.recoveryClaim, /^[a-f0-9]{64}$/)
@@ -442,5 +447,63 @@ test('a cancel request racing with an in-progress seal is never acknowledged and
     const status = (await f.service.getScanContext({ scanId: parentId })).scan.status
     if (outcome.value) assert.equal(status, 'canceled')
     else { assert.equal(status, 'completed'); assert.match(outcome.error.message, /already|completed/i) }
+  } finally { await f.cleanup() }
+})
+
+test('canceling while a child waits to publish its seal leaves no final documents', async () => {
+  const f = await fixture()
+  const complete = f.service.completeScan.bind(f.service)
+  const update = f.service.store.update.bind(f.service.store)
+  let sealing
+  let release
+  const publishing = Promise.withResolvers()
+  f.service.completeScan = async (args, options) => {
+    sealing = args.scanId
+    try { return await complete(args, options) } finally { sealing = undefined }
+  }
+  f.service.store.update = async (scanId, mutate, options) => {
+    if (scanId === sealing) {
+      release = await acquireStateLock(join(f.service.store.stateDir, '.locks', 'index.sqlite'))
+      publishing.resolve(scanId)
+    }
+    return update(scanId, mutate, options)
+  }
+  try {
+    const { scanId } = await f.coordinator.start({ targetPath: f.target, workers: 1, maxDiscoveryRuns: 1 }, { agent: { id: 'owner' } })
+    const childId = await publishing.promise
+    await f.coordinator.cancel({ scanId }, { agent: { id: 'owner' } })
+    release()
+    release = undefined
+    await f.coordinator.wait(scanId)
+    const child = await f.service.getScan({ scanId: childId })
+    assert.equal(child.scan.status, 'canceled')
+    assert.equal(child.manifest, null)
+    const { dir } = await f.service.store.get(childId)
+    await assert.rejects(access(join(dir, 'scan-manifest.json')), { code: 'ENOENT' })
+    await assert.rejects(access(join(dir, 'report.md')), { code: 'ENOENT' })
+  } finally {
+    release?.()
+    await f.coordinator.dispose()
+    await f.cleanup()
+  }
+})
+
+test('journal transitions avoid serializing historical run payloads', async () => {
+  const f = await fixture()
+  const processResult = f.coordinator.processResult.bind(f.coordinator)
+  let serializations = 0
+  f.coordinator.processResult = async (journal, run, controller) => {
+    await processResult(journal, run, controller)
+    if (run.number === 1) {
+      Object.defineProperty(run.draft, 'toJSON', {
+        value() { serializations++; return { ...this } },
+      })
+    }
+  }
+  try {
+    const { scanId } = await f.coordinator.start({ targetPath: f.target, workers: 1, maxDiscoveryRuns: 3 }, { agent: { id: 'owner' } })
+    await f.coordinator.wait(scanId)
+    assert.equal((await f.service.getScan({ scanId })).scan.status, 'completed')
+    assert.equal(serializations, 1)
   } finally { await f.cleanup() }
 })

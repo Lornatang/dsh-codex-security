@@ -5,6 +5,7 @@ export declare function nowIso(): string;
 export declare function newId(prefix: string, hexChars?: number): string;
 export declare function ensureDir(path: string): Promise<void>;
 export declare function writeFileAtomic(path: string, data: string | Uint8Array): Promise<void>;
+export declare function renameFileAtomic(from: string, to: string): Promise<void>;
 /** Resolve symlinked ancestors even when the final path does not yet exist. */
 export declare function canonicalProspectivePath(path: string): Promise<string>;
 export declare function writeJsonAtomic(path: string, value: unknown): Promise<void>;

@@ -175,7 +175,12 @@ test('recovery applies the no-new stop threshold before launching another worker
     assert.equal(result.status, 'completed', result.error)
     await resumed.exited
     assert.equal(resumed.messages.filter((message) => message.type === 'worker').length, 0)
-    assert.equal(JSON.parse(await readFile(path, 'utf8')).runs.length, 1)
+    const saved = JSON.parse(await readFile(path, 'utf8'))
+    assert.equal(saved.runs.length, 1)
+    assert.equal(saved.runs[0].draft, undefined)
+    const payload = JSON.parse(await readFile(join(state, 'deep', started.scanId + '.runs', saved.runs[0].childId + '.json'), 'utf8'))
+    assert.deepEqual(payload.receipts, ['app.js'])
+    assert.deepEqual(payload.findings, [])
   } finally {
     if (first.process.exitCode === null && first.process.signalCode === null) { first.process.kill('SIGKILL'); await first.exited }
     if (resumed?.process.exitCode === null && resumed?.process.signalCode === null) { resumed.process.kill('SIGKILL'); await resumed.exited }
@@ -205,6 +210,40 @@ test('cancel after a crash also terminates an unfinished managed child scan', as
   } finally {
     if (first.process.exitCode === null && first.process.signalCode === null) { first.process.kill('SIGKILL'); await first.exited }
     if (canceler?.process.exitCode === null && canceler?.process.signalCode === null) { canceler.process.kill('SIGKILL'); await canceler.exited }
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('recovery seals a persisted sidecar result after the worker host exits', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dcs-sidecar-recovery-')))
+  const target = join(root, 'target')
+  const state = join(root, 'state')
+  await mkdir(target)
+  await writeFile(join(target, 'app.js'), 'const value = 1\n')
+  const first = child(['pause-seal', state, target])
+  let resumed
+  try {
+    const started = await first.message('started')
+    const worker = await first.message('worker')
+    const { childScanId } = await first.message('child-seal')
+    first.process.kill('SIGKILL')
+    await first.exited
+    const journalPath = join(state, 'deep', started.scanId + '.json')
+    const journal = JSON.parse(await readFile(journalPath, 'utf8'))
+    assert.equal(journal.runs[0].state, 'result')
+    assert.equal(journal.runs[0].draft, undefined)
+    assert.deepEqual(JSON.parse(await readFile(join(state, 'deep', started.scanId + '.runs', worker.childId + '.json'), 'utf8')).receipts, ['app.js'])
+
+    resumed = child(['resume', state, target, started.scanId, started.recoveryClaim, 'other'])
+    const result = await resumed.message('done')
+    assert.equal(result.status, 'completed', result.error)
+    await resumed.exited
+    assert.equal(resumed.messages.filter((message) => message.type === 'worker').length, 1)
+    const service = new SecurityService({}, { config: { stateDir: state } })
+    assert.equal((await service.getScan({ scanId: childScanId })).manifest.status, 'completed')
+  } finally {
+    if (first.process.exitCode === null && first.process.signalCode === null) { first.process.kill('SIGKILL'); await first.exited }
+    if (resumed?.process.exitCode === null && resumed?.process.signalCode === null) { resumed.process.kill('SIGKILL'); await resumed.exited }
     await rm(root, { recursive: true, force: true })
   }
 })

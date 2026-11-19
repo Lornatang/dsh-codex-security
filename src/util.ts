@@ -31,19 +31,23 @@ export async function writeFileAtomic(path: string, data: string | Uint8Array): 
   const handle = await open(tmp, 'wx', 0o600)
   try {
     try { await handle.writeFile(data) } finally { await handle.close() }
-    const deadline = Date.now() + 2000
-    let pause = 10
-    for (;;) {
-      try { await rename(tmp, path); break } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code
-        if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '') || Date.now() >= deadline) throw error
-        await delay(pause)
-        pause = Math.min(100, pause * 2)
-      }
-    }
+    await renameFileAtomic(tmp, path)
   } catch (error) {
     await rm(tmp, { force: true }).catch(() => undefined)
     throw error
+  }
+}
+
+export async function renameFileAtomic(from: string, to: string): Promise<void> {
+  const deadline = Date.now() + 2000
+  let pause = 10
+  for (;;) {
+    try { await rename(from, to); return } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '') || Date.now() >= deadline) throw error
+      await delay(pause)
+      pause = Math.min(100, pause * 2)
+    }
   }
 }
 

@@ -23,7 +23,11 @@ export interface ChangedFile {
 }
 export declare function changedFiles(root: string, options: {
     base?: string;
+    head?: string;
     staged?: boolean;
     workingTree?: boolean;
+    signal?: AbortSignal;
 }): Promise<ChangedFile[]>;
+/** Read a bounded prefix of a regular file from the exact commit. */
+export declare function revisionFilePrefix(root: string, revision: string, path: string, limit: number): Promise<Buffer | undefined>;
 export declare function fileDigest(path: string, signal?: AbortSignal): Promise<string | undefined>;

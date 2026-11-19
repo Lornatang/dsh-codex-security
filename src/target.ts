@@ -2,8 +2,8 @@ import { lstat, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { InventoryInfo, ScopeInfo, TargetInfo, TargetKind } from './types.js'
-import { isProbablyBinary, isWithin, joinWithin, languageOf, listFiles, matchesAny, matchesScopePath, normalizeLine, stableTargetId, truncate } from './util.js'
-import { changedFiles, currentBranch, fileDigest, headRevision, remoteUrl, repoRoot, resolveRevision, statusEntries, trackedFiles } from './git.js'
+import { isProbablyBinary, isWithin, joinWithin, languageOf, listFiles, matchesAny, matchesScopePath, normalizeLine, sanitizeRelative, stableTargetId, truncate } from './util.js'
+import { changedFiles, currentBranch, fileDigest, headRevision, remoteUrl, repoRoot, resolveRevision, revisionFilePrefix, statusEntries, trackedFiles } from './git.js'
 
 export interface ResolveTargetOptions {
   targetPath?: string
@@ -68,7 +68,7 @@ export async function resolveTarget(options: ResolveTargetOptions): Promise<Reso
 
   let kind: TargetKind = 'directory_snapshot'
   if (gitRepo) kind = options.diffTarget || options.workingTree ? 'git_diff' : 'git_worktree'
-  const diff = kind === 'git_diff' ? await resolveDiff(rootPath, { diffTarget: baseRevision, workingTree: options.workingTree === true }) : undefined
+  const diff = kind === 'git_diff' ? await resolveDiff(rootPath, { diffTarget: baseRevision, workingTree: options.workingTree === true, head: revision, signal: options.signal }) : undefined
   const diffFiles = diff?.files.filter((file) =>
     (matchesScopePath(file.path, scope.includePaths) || (file.oldPath !== undefined && matchesScopePath(file.oldPath, scope.includePaths))) &&
     !matchesAny(file.path, excludePaths))
@@ -183,16 +183,18 @@ function displayNameFor(rootPath: string, remote: string | undefined): string {
 
 export interface DiffSnapshot { files: { status: string; path: string; oldPath?: string }[]; base?: string; head?: string; workingTree: boolean }
 
-export async function resolveDiff(rootPath: string, options: { diffTarget?: string; staged?: boolean; workingTree?: boolean }): Promise<DiffSnapshot> {
-  const head = await headRevision(rootPath)
-  const files = await changedFiles(rootPath, { base: options.diffTarget, staged: options.staged, workingTree: options.workingTree })
+export async function resolveDiff(rootPath: string, options: { diffTarget?: string; head?: string; staged?: boolean; workingTree?: boolean; signal?: AbortSignal }): Promise<DiffSnapshot> {
+  const head = options.head ?? await headRevision(rootPath, options.signal)
+  const files = await changedFiles(rootPath, { base: options.diffTarget, head, staged: options.staged, workingTree: options.workingTree, signal: options.signal })
   return { files, ...(options.diffTarget ? { base: options.diffTarget } : {}), ...(head ? { head } : {}), workingTree: options.workingTree === true || (!options.diffTarget && !options.staged) }
 }
 
+type EvidenceSource = string | Pick<TargetInfo, 'rootPath' | 'kind' | 'workingTree' | 'revision' | 'headRevision'>
+
 /** Read one source line for anchor derivation without trusting it as instructions. */
-export async function readEvidenceLine(rootPath: string, path: string, line: number, maxBytes: number): Promise<string | undefined> {
+export async function readEvidenceLine(source: EvidenceSource, path: string, line: number, maxBytes: number): Promise<string | undefined> {
   if (!Number.isFinite(line) || line < 1) return undefined
-  const lines = await readEvidenceFileLines(rootPath, path, maxBytes)
+  const lines = await readEvidenceFileLines(source, path, maxBytes)
   if (!lines) return undefined
   const value = lines[Math.trunc(line) - 1]
   return value === undefined ? undefined : truncate(normalizeLine(value), 400)
@@ -204,7 +206,7 @@ export async function readEvidenceLine(rootPath: string, path: string, line: num
  * file prefix for every requested line, so a draft citing several lines of one
  * file paid that cost repeatedly.
  */
-export async function readEvidenceLines(rootPath: string, requests: { path: string; line: number }[], maxBytes: number): Promise<Map<string, string>> {
+export async function readEvidenceLines(source: EvidenceSource, requests: { path: string; line: number }[], maxBytes: number): Promise<Map<string, string>> {
   const byPath = new Map<string, number[]>()
   for (const request of requests) {
     if (!Number.isFinite(request.line) || request.line < 1) continue
@@ -217,7 +219,7 @@ export async function readEvidenceLines(rootPath: string, requests: { path: stri
   const concurrency = 8
   for (let index = 0; index < groups.length; index += concurrency) {
     await Promise.all(groups.slice(index, index + concurrency).map(async ([path, lineNumbers]) => {
-      const lines = await readEvidenceFileLines(rootPath, path, maxBytes)
+      const lines = await readEvidenceFileLines(source, path, maxBytes)
       if (!lines) return
       for (const line of lineNumbers) {
         const value = lines[line - 1]
@@ -229,7 +231,17 @@ export async function readEvidenceLines(rootPath: string, requests: { path: stri
 }
 
 /** Hardened single-file read shared by the line readers. */
-async function readEvidenceFileLines(rootPath: string, path: string, maxBytes: number): Promise<string[] | undefined> {
+async function readEvidenceFileLines(source: EvidenceSource, path: string, maxBytes: number): Promise<string[] | undefined> {
+  const maxPrefixBytes = Math.trunc(Math.min(maxBytes, 256 * 1024))
+  if (typeof source !== 'string' && source.kind === 'git_diff' && !source.workingTree) {
+    const revision = source.headRevision ?? source.revision
+    if (!revision) return undefined
+    let clean: string
+    try { clean = sanitizeRelative(path) } catch { return undefined }
+    const prefix = await revisionFilePrefix(source.rootPath, revision, clean, maxPrefixBytes)
+    return prefix?.toString('utf8').split('\n')
+  }
+  const rootPath = typeof source === 'string' ? source : source.rootPath
   const { open } = await import('node:fs/promises')
   const { constants } = await import('node:fs')
   if (typeof path !== 'string' || path.length === 0) return undefined
@@ -253,7 +265,7 @@ async function readEvidenceFileLines(rootPath: string, path: string, maxBytes: n
     if (!canonical || !isWithin(realRoot, canonical)) return undefined
     const current = await lstat(canonical).catch(() => undefined)
     if (!current || !current.isFile() || current.dev !== opened.dev || current.ino !== opened.ino || current.size !== opened.size) return undefined
-    const buffer = Buffer.alloc(Math.min(maxBytes, 256 * 1024))
+    const buffer = Buffer.alloc(maxPrefixBytes)
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
     return buffer.subarray(0, bytesRead).toString('utf8').split('\n')
   } catch { return undefined } finally { await handle?.close().catch(() => undefined) }

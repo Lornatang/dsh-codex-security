@@ -1,4 +1,4 @@
-import { lstat, readFile } from 'node:fs/promises'
+import { lstat, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { DEFAULT_CONFIG } from './config.js'
 import type { Config } from './config.js'
@@ -17,7 +17,7 @@ import { FINDING_STATUSES, SEVERITIES } from './types.js'
 import { ScanStore, defaultStateDir } from './store.js'
 import { readEvidenceLine, readEvidenceLines, resolveTarget } from './target.js'
 import { assertArtifactContract } from './schema.js'
-import { canonicalProspectivePath, ensureDir, isWithin, joinWithin, newId, normalizeLine, nowIso, readFullText, readJson, sanitizeRelative, sha256, truncate, writeFileAtomic, writeJsonAtomic } from './util.js'
+import { canonicalProspectivePath, ensureDir, isWithin, joinWithin, newId, normalizeLine, nowIso, readFullText, readJson, renameFileAtomic, sanitizeRelative, sha256, truncate, writeFileAtomic, writeJsonAtomic } from './util.js'
 import { createExportValidator, writeSecureExport } from './secure-export.js'
 import { acquireStateLock } from './state-lock.js'
 import { WorkerRegistry } from './deep-worker.js'
@@ -41,7 +41,13 @@ async function possibleGitMetadata(root: string): Promise<boolean> {
   }
 }
 
+interface SealOptions {
+  signal?: AbortSignal
+  withPublication?: (publish: () => Promise<void>) => Promise<void>
+}
+
 interface StoredDraft {
+  boundRevisionEvidence?: true
   scanId: string
   recordedAt: string
   complete: boolean
@@ -517,6 +523,7 @@ export class SecurityService {
     validateFindingEvidence(deduped)
     assertArtifactContract('findings', buildFindingsDocument(scanId, deduped))
     const stored: StoredDraft = {
+      ...(record.target.kind === 'git_diff' && !record.target.workingTree ? { boundRevisionEvidence: true } : {}),
       scanId,
       recordedAt: nowIso(),
       complete: draft.complete === true,
@@ -574,7 +581,7 @@ export class SecurityService {
     // Group by source path first so a draft citing several lines of one file
     // pays one hardened read instead of one per line.
     const requests = Array.from(keys.values())
-    const lines = await readEvidenceLines(record.target.rootPath, requests, this.config.maxFileBytes)
+    const lines = await readEvidenceLines(record.target, requests, this.config.maxFileBytes)
     const evidence = new Map<string, string>()
     for (const [key, value] of keys) {
       const line = lines.get(value.path + ':' + value.line)
@@ -670,7 +677,7 @@ export class SecurityService {
       const severity = this.severityOf(requiredStr(input, 'severity'))
       const path = sanitizeRelative(requiredStr(input, 'path'))
       const startLine = Math.max(1, Math.floor(num(input['startLine']) ?? 1))
-      const anchor = str(input['anchor']) ?? normalizeAnchor(ruleId, path, await readEvidenceLine(record.target.rootPath, path, startLine, this.config.maxFileBytes), str(input['instance']))
+      const anchor = str(input['anchor']) ?? normalizeAnchor(ruleId, path, await readEvidenceLine(record.target, path, startLine, this.config.maxFileBytes), str(input['instance']))
       const instance = str(input['instance'])
       const key = ruleId + '\u0000' + anchor + '\u0000' + (instance ?? '')
       const candidateId = 'cand_' + sha256(key).slice(0, 16)
@@ -842,11 +849,11 @@ export class SecurityService {
     return { ok: true, scanId, ...artifact }
   }
 
-  async completeScan(args: Json, options?: { signal?: AbortSignal }): Promise<Json> {
+  async completeScan(args: Json, options?: SealOptions): Promise<Json> {
     return this.withScanLock(requiredStr(args, 'scanId'), () => this.completeScanUnlocked(args, options), args, options?.signal)
   }
 
-  private async completeScanUnlocked(args: Json, options?: { signal?: AbortSignal }): Promise<Json> {
+  private async completeScanUnlocked(args: Json, options?: SealOptions): Promise<Json> {
     options?.signal?.throwIfAborted()
     const scanId = requiredStr(args, 'scanId')
     const { record, dir } = await this.requireScan(scanId)
@@ -875,17 +882,23 @@ export class SecurityService {
     const reviewState: DraftReviewState = draft.input.reviewState ?? { surfaces: [] }
     const warnings = [...record.warnings]
     let migratedDraftIds: { previous: string; current: string }[] | undefined
-    if (findings.some((finding) => finding.fingerprints.primary !== fingerprintFor(record.target.targetId, finding.ruleId, finding.identity.anchor, finding.identity.instance))) {
-      // Only unsealed checkpoints are migrated. Sealed historical artifacts
-      // remain byte-for-byte immutable and use the legacy comparison path.
+    const legacyIds = findings.some((finding) => finding.fingerprints.primary !== fingerprintFor(record.target.targetId, finding.ruleId, finding.identity.anchor, finding.identity.instance))
+    const verifyRevisionEvidence = record.target.kind === 'git_diff' && !record.target.workingTree && !draft.boundRevisionEvidence
+    if (legacyIds || verifyRevisionEvidence) {
+      // Older checkpoints may have derived revision-only anchors from disk.
+      // Match identities before publishing; candidate and review records may
+      // still reference the original findings.
       const evidenceLines = await this.collectEvidenceLines(record, draft.input.findings)
       const migrated = draft.input.findings.map((input) => normalizeFinding(scanId, input, { rootPath: record.target.rootPath, targetId: record.target.targetId, evidenceLines }))
       if (new Set(migrated.map((finding) => finding.fingerprints.primary)).size !== migrated.length) throw new Error('codex-security: legacy draft has duplicate finding identities; record a corrected draft')
       const byIdentity = new Map(migrated.map((finding) => [JSON.stringify([finding.ruleId, finding.identity.anchor, finding.identity.instance ?? '', finding.locations[0]?.path]), finding]))
-      migratedDraftIds = findings.map((finding) => ({ previous: finding.findingId, current: byIdentity.get(JSON.stringify([finding.ruleId, finding.identity.anchor, finding.identity.instance ?? '', finding.locations[0]?.path]))?.findingId ?? '' }))
-      if (migratedDraftIds.some((entry) => !entry.current)) throw new Error('codex-security: legacy draft identities changed; record a corrected draft')
-      findings = sortedFindings(migrated)
-      warnings.push('unsealed legacy draft finding IDs were migrated to the Codex-compatible identity contract')
+      const matches = findings.map((finding) => ({ previous: finding.findingId, current: byIdentity.get(JSON.stringify([finding.ruleId, finding.identity.anchor, finding.identity.instance ?? '', finding.locations[0]?.path]))?.findingId ?? '' }))
+      if (matches.some((entry) => !entry.current)) throw new Error('codex-security: legacy draft identities changed; record a corrected draft')
+      if (legacyIds) {
+        migratedDraftIds = matches
+        findings = sortedFindings(migrated)
+        warnings.push('unsealed legacy draft finding IDs were migrated to the Codex-compatible identity contract')
+      }
     }
     if (reviewState.surfaces.length === 0) throw new Error('codex-security: at least one coverage surface is required before sealing')
     const candidates = (await readJson<CandidatesDocument>(join(dir, 'candidates.json')))?.candidates ?? []
@@ -997,23 +1010,43 @@ export class SecurityService {
       },
     }
     assertArtifactContract('scan-manifest', manifest)
-    for (const file of sealedFiles) {
-      options?.signal?.throwIfAborted()
-      await writeFileAtomic(joinWithin(dir, file.path), file.content)
-    }
-    await writeJsonAtomic(join(dir, 'scan-manifest.json'), manifest)
     const counts = severityCounts(findings)
     options?.signal?.throwIfAborted()
-    const updated = await this.store.update(scanId, (current) => {
-      current.status = 'completed'
-      current.completedAt = sealedAt
-      current.findingsCount = findings.length
-      current.severityCounts = counts
-      current.artifacts = record.artifacts.map((entry) => ({ ...entry, createdAt: sealedAt }))
-      current.policy = policy
-      current.warnings = warnings
-      current.progress.phase = 'completed'
-    })
+    const stageDir = await mkdtemp(join(dir, 'checkpoints', 'seal-'))
+    let updated: ScanRecord
+    try {
+      for (const file of sealedFiles) {
+        options?.signal?.throwIfAborted()
+        await writeFileAtomic(join(stageDir, file.path), file.content)
+      }
+      await writeJsonAtomic(join(stageDir, 'scan-manifest.json'), manifest)
+      updated = await this.store.update(scanId, (current) => {
+        current.status = 'completed'
+        current.completedAt = sealedAt
+        current.findingsCount = findings.length
+        current.severityCounts = counts
+        current.artifacts = record.artifacts.map((entry) => ({ ...entry, createdAt: sealedAt }))
+        current.policy = policy
+        current.warnings = warnings
+        current.progress.phase = 'completed'
+      }, {
+        signal: options?.signal,
+        publish: async (commit) => {
+          const publish = async () => {
+            options?.signal?.throwIfAborted()
+            // Readers use the scan record as the publication marker. Once
+            // publication starts, finish it before honoring cancellation.
+            for (const file of sealedFiles) await renameFileAtomic(join(stageDir, file.path), join(dir, file.path))
+            await renameFileAtomic(join(stageDir, 'scan-manifest.json'), join(dir, 'scan-manifest.json'))
+            await commit()
+          }
+          if (options?.withPublication) await options.withPublication(publish)
+          else await publish()
+        },
+      })
+    } finally {
+      await rm(stageDir, { recursive: true, force: true }).catch(() => undefined)
+    }
     const absolute = (name: string): string => join(dir, name)
     return {
       ok: true,
@@ -1091,12 +1124,17 @@ export class SecurityService {
     // directory instead of re-resolving the index (and re-reading scan.json)
     // through the store once per document.
     const triage = (await readJson<Record<string, TriageEntry>>(join(dir, 'triage.json'))) ?? {}
-    const findings = ((await readJson<{ findings?: Finding[] }>(join(dir, 'findings.json')))?.findings ?? []).map((finding) => {
+    const [document, coverage, manifest] = record.status === 'completed'
+      ? await Promise.all([
+        readJson<{ findings?: Finding[] }>(join(dir, 'findings.json')),
+        readJson<CoverageDocument>(join(dir, 'coverage.json')),
+        readJson<Json>(join(dir, 'scan-manifest.json')),
+      ])
+      : []
+    const findings = (document?.findings ?? []).map((finding) => {
       const entry = triage[finding.findingId]
       return { ...finding, status: entry?.status ?? 'open', ...(entry ? { triage: entry } : {}) }
     })
-    const coverage = await readJson<CoverageDocument>(join(dir, 'coverage.json'))
-    const manifest = await readJson<Json>(join(dir, 'scan-manifest.json'))
     const artifacts = await this.store.listArtifacts(scanId, dir)
     const reviewItems = (await readJson<ReviewItemsDocument>(join(dir, 'review-items.json')))?.items ?? []
     return {
